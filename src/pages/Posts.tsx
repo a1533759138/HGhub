@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { api, cover, fmt, platform } from "../api";
+import { api, cover, fmt, isMobile } from "../api";
 import type { Post } from "../types";
 import { useStore } from "../store";
 import { Empty, Img } from "../components/ui";
@@ -102,7 +102,7 @@ export function PostDetail({ id, onBack }: { id: number; onBack: () => void }) {
 
   return (
     <div className="absolute inset-0 bg-bg flex flex-col">
-      <div className="shrink-0 flex items-center gap-2 px-2 bg-s1" style={{ paddingTop: platform !== "windows" ? "var(--sat, 0px)" : 0, height: platform !== "windows" ? "calc(44px + var(--sat, 0px))" : 44 }}>
+      <div className="shrink-0 flex items-center gap-2 px-2 bg-s1" style={{ paddingTop: isMobile ? "var(--sat, 0px)" : 0, height: isMobile ? "calc(44px + var(--sat, 0px))" : 44 }}>
         <button onClick={onBack} className="w-9 h-9 rounded-full flex items-center justify-center text-on hover:bg-s3 pressable"><IBack size={19} /></button>
         <span className="text-[13.5px] font-semibold text-on">吃瓜详情</span>
       </div>

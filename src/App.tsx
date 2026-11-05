@@ -1,6 +1,6 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { useStore, type Page, type Tab } from "./store";
-import { selfTest } from "./api";
+import { selfTest, isMobile } from "./api";
 import { addPluginListener, invoke } from "@tauri-apps/api/core";
 import { runBack } from "./back";
 import Home from "./pages/Home";
@@ -14,9 +14,8 @@ import LoginModal from "./components/LoginModal";
 import { ToastHost } from "./components/ui";
 import { DesktopRail, DesktopTitleBar } from "./components/DesktopChrome";
 import ResizeHandles from "./components/ResizeHandles";
-import { IGrid, IGridF, IHome, IHomeF, ISearch, IUser, IUserF, Logo } from "./icons";
 
-/* ============ 底部标签栏（Android）—— 细瘦纯文字、低侵入 ============ */
+/* ============ 底部标签栏（移动端：Android / iOS 共用）—— 细瘦纯文字、低侵入 ============ */
 const TABS: { k: Tab; label: string }[] = [
   { k: "home", label: "首页" },
   { k: "search", label: "搜索" },
@@ -25,18 +24,10 @@ const TABS: { k: Tab; label: string }[] = [
 ];
 
 /** 底栏占高（不含安全区）。Feed 的进度条、侧边按钮按它 + --sab 往上让，改底栏高度要同步改这里。 */
-const TAB_H = { android: 48, ios: 62 } as const;
+const TAB_H = { android: 48, ios: 74 } as const;
 
 function TabBar() {
-  const { tab, setTab, theme, platform } = useStore();
-  /* iOS 用悬浮胶囊底栏（CSS 仿液态玻璃），其它平台走下面的细瘦纯文字分栏 */
-  if (platform === "ios") return <GlassTabBar />;
-  const items: { k: Tab; label: string }[] = [
-    { k: "home", label: "首页" },
-    { k: "search", label: "搜索" },
-    { k: "category", label: "分类" },
-    { k: "profile", label: "我的" },
-  ];
+  const { tab, setTab, theme } = useStore();
   /* 细瘦纯文字分栏：只有选中项高亮，没有指示点。
      首页是沉浸视频 → 底栏压深色；搜索/分类/我的 是浅色内容页 →
      浅色主题下底栏跟着换成浅色，深色主题保持深色。 */
@@ -51,7 +42,7 @@ function TabBar() {
         boxShadow: lightBar ? "0 -2px 14px rgba(0,0,0,.05)" : "none",
       }}>
       <div className="h-[40px] flex items-center px-1">
-        {items.map(({ k, label }) => {
+        {TABS.map(({ k, label }) => {
           const on = tab === k;
           return (
             <button key={k} onClick={() => setTab(k)} className="flex-1 h-full flex items-center justify-center pressable">
@@ -64,38 +55,6 @@ function TabBar() {
                 }}>
                 {label}
               </span>
-            </button>
-          );
-        })}
-      </div>
-    </nav>
-  );
-}
-
-/* ============ 底部标签栏（iOS）—— 悬浮胶囊，CSS 仿液态玻璃 ============ */
-const TAB_ICONS: Record<Tab, [typeof IHome, typeof IHome]> = {
-  home: [IHome, IHomeF],
-  search: [ISearch, ISearch],
-  category: [IGrid, IGridF],
-  profile: [IUser, IUserF],
-};
-
-function GlassTabBar() {
-  const { tab, setTab } = useStore();
-  /* 首页是全屏视频，底栏固定用深色玻璃；其他页随主题 */
-  const onVideo = tab === "home";
-  return (
-    <nav className="absolute bottom-0 inset-x-0 z-30 px-5 pointer-events-none" style={{ paddingBottom: "var(--sab, 0px)" }}>
-      <div className={`glass-bar ${onVideo ? "is-dark" : ""} pointer-events-auto h-[54px] p-1 flex items-center rounded-full`}>
-        {TABS.map(({ k, label }) => {
-          const on = tab === k;
-          const [Icon, IconOn] = TAB_ICONS[k];
-          const I = on ? IconOn : Icon;
-          return (
-            <button key={k} onClick={() => setTab(k)} aria-current={on ? "page" : undefined}
-              className={`flex-1 h-full rounded-full flex flex-col items-center justify-center gap-[3px] transition-colors duration-200 pressable ${on ? "glass-pill-on" : ""}`}>
-              <I size={20} className={on ? "text-primary" : onVideo ? "text-white/75" : "text-on/70"} />
-              <span className={`text-[10.5px] leading-none ${on ? "font-semibold text-primary" : onVideo ? "text-white/75" : "text-on/70"}`}>{label}</span>
             </button>
           );
         })}
@@ -127,7 +86,7 @@ function StackPage({ page, onBack, wide, top, bottomInset }: {
 function AppBody() {
   const { platform, tab, setTab, stack, pop, loginOpen, setLoginOpen, fs } = useStore();
   const mainRef = useRef<HTMLDivElement>(null);
-  const [wide, setWide] = useState(platform !== "android");
+  const [wide, setWide] = useState(!isMobile);
   const [collapsed, setCollapsed] = useState(false);
 
   useLayoutEffect(() => {
@@ -160,7 +119,7 @@ function AppBody() {
 
   const vis = (k: Tab) => (tab === k ? "absolute inset-0" : "absolute inset-0 invisible pointer-events-none");
   const pageActive = stack.length === 0 && !loginOpen;
-  const mobile = platform !== "windows";
+  const mobile = isMobile;
   const bottomInset = mobile ? (fs ? 0 : TAB_H[platform === "ios" ? "ios" : "android"]) : 14;
   /* 栈页（从搜索/分类/我的进入的播放页、图文页）不显示底栏：
      底栏会盖住评论抽屉的输入框，且这些页面本身是沉浸的 */
@@ -168,7 +127,7 @@ function AppBody() {
 
   return (
     <div className={`absolute inset-0 flex bg-canvas plat-${platform}`}>
-      {platform !== "android" && <DesktopRail collapsed={collapsed} />}
+      {!mobile && <DesktopRail collapsed={collapsed} />}
       <div ref={mainRef} className="relative flex-1 min-w-0 overflow-hidden win-main">
         <div className={vis("home")}><Home active={pageActive && tab === "home"} bottomInset={bottomInset} /></div>
         <div className={vis("search")}><Search active={pageActive && tab === "search"} wide={wide} /></div>
@@ -256,10 +215,11 @@ function ShellInner({ collapsed, theater }: { collapsed: boolean; theater: boole
   );
 }
 
-/* ============ 移动端（无壳） ============ */
+/* ============ 移动端（Android / iOS 无壳） ============ */
 function MobileShell() {
+  const { platform } = useStore();
   return (
-    <div className="absolute inset-0 flex flex-col bg-canvas plat-android"
+    <div className={`absolute inset-0 flex flex-col bg-canvas plat-${platform}`}
       style={{ "--sat": "max(env(safe-area-inset-top), 8px)", "--sab": "max(env(safe-area-inset-bottom), 6px)" } as React.CSSProperties}>
       <div className="relative flex-1 min-h-0">
         <AppBody />
@@ -315,7 +275,7 @@ export default function App() {
 
   return (
     <>
-      {platform === "android" ? <MobileShell /> : <DesktopShell />}
+      {isMobile ? <MobileShell /> : <DesktopShell />}
       <LoginModal />
       <ToastHost />
       {/* 登录遮罩键盘处理占位 */}

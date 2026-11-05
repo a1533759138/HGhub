@@ -249,7 +249,9 @@ input[type="range"].hg-range::-webkit-slider-thumb { -webkit-appearance: none; w
    原生全屏时红绿灯被系统隐藏（is-native-fs），让位收回，避免留一条空白。 */
 .plat-macos .win-titlebar { padding-left: 84px; }
 .plat-macos .win-titlebar.is-native-fs { padding-left: 14px; }
-.plat-android .win-main { background: var(--p-bg); overflow: hidden; }
+/* 移动端（Android / iOS）共用：不加外边距、不圆角，内容铺满整屏 */
+.plat-android .win-main,
+.plat-ios .win-main { background: var(--p-bg); overflow: hidden; }
 
 /* iOS 悬浮底栏：CSS 仿液态玻璃（毛玻璃 + 高光描边）。.is-dark 用在首页视频上，不随主题变浅 */
 .glass-bar {

@@ -17,6 +17,10 @@ export const isMacos = !isIOS && /Macintosh|Mac OS X/i.test(ua);
 export const platform: "android" | "ios" | "windows" | "macos" =
   isAndroid ? "android" : isIOS ? "ios" : isMacos ? "macos" : "windows";
 
+/** 移动端：iOS 与 Android 共用同一套界面（底部标签栏 + 无边框壳），
+ *  只有 Windows / macOS 才走 DesktopShell 的标题栏 + 左侧栏。 */
+export const isMobile = platform === "android" || platform === "ios";
+
 /** 自定义协议地址随平台不同（见 tauri `register_asynchronous_uri_scheme_protocol` 文档）：
  *  Windows / Android → `http://<scheme>.localhost`
  *  macOS / iOS / Linux → `<scheme>://localhost`
