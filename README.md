@@ -111,7 +111,10 @@ pnpm ios:build        # 有开发者证书时直接出签名 IPA
 3. **HLS 代理**：m3u8 与分片经自定义协议转发并改写 `#EXT-X-KEY` / 分片地址，绕开 WebView 的 CORS 与防盗链。
 4. **自定义协议**：Windows / Android 为 `http://hg.localhost/*`，macOS / iOS（WKWebView）为 `hg://localhost/*`。
    Rust 侧 `media.rs` 的 `LOCAL_ORIGIN` 与前端 `api.ts` 的 `LOCAL` 按平台取值，必须一致，否则封面与视频全部加载失败。
-5. **不做签名逆向**：只复用浏览器同源行为，接口字段均有文档与实测样本。
+5. **线路自动切换**：上游域名经常被污染 / 失效，`net::edge` 在请求失败时自动换线再试一次。
+   候选顺序为固定线路 → 内置种子（泛解析随机子域，不依赖任何外部页面）→ 地址发布页镜像；
+   换好的地址写入应用数据目录的 `line.json`，下次启动直接沿用，也可在设置里手动指定。
+6. **不做签名逆向**：只复用浏览器同源行为，接口字段均有文档与实测样本。
 
 
 ## 免责声明
@@ -155,6 +158,12 @@ cd src-tauri/gen/android
 **3. Android 构建提示找不到 SDK / NDK**
 
 需要设置 `ANDROID_HOME`（Android SDK 根目录）、`NDK_HOME`（`$ANDROID_HOME/ndk/<版本>`）与 `JAVA_HOME`（JDK 17）。
+
+**4. iPhone / 桌面端显示「没有网络」，但浏览器能打开站点**
+
+`huangguoai.com` 被 DNS 污染时会解析到无关 IP（如 `168.143.171.189`），HTTPS 直接超时。
+首次请求会因此慢 6～10 秒，客户端随后会自动换到可用镜像并记住，属正常现象；
+若一直失败，进「设置 → 线路」手动挑一条「检测」通过的即可。
 
 ## LinuxDO
 https://linux.do/

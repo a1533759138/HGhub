@@ -18,6 +18,58 @@ const PUBLISH_PAGE: &str = "https://huangguoai.pages.dev/";
 const MIRROR_MAX: usize = 60;
 /// 单条线路探测超时
 const PROBE_TIMEOUT: Duration = Duration::from_secs(8);
+/// 自动换线时单条探测超时（比手动测速更急，别让首屏等太久）
+const AUTO_PROBE_TIMEOUT: Duration = Duration::from_secs(5);
+/// 自动换线最多试多少个镜像（发布页镜像可达上百条，全试一遍要几分钟）
+const AUTO_MIRROR_TRY: usize = 18;
+/// 自动换线的总预算：超了就放弃，宁可报错也不无限卡首屏
+const AUTO_BUDGET: Duration = Duration::from_secs(22);
+
+/// 判断「这条线路真能跑业务」用的接口：最便宜且不需要登录。
+const PROBE_PATH: &str = "/api/videos?page=1&size=1";
+
+/// 兜底种子域名：发布页抓不到时用它自举。
+///
+/// 这些域名是**泛解析**（`<任意子域>.lbvrhyir.cc` 都能解析到同一组服务器，
+/// 裸域反而不通），发布页自己也是用 `getRandomSubdomain()` 随机拼的。
+/// 所以随机子域比写死的子域更难被定点封锁——每次启动换一批就行。
+const SEED_DOMAINS: [&str; 1] = ["lbvrhyir.cc"];
+/// 种子里的固定子域（大学代号，发布页给的原始清单）
+const SEED_SUBS: [&str; 8] = ["thu", "pku", "fdu", "sjtu", "zju", "nju", "xmu", "sysu"];
+/// 兜底时另外生成多少个随机子域
+const SEED_RANDOM: usize = 6;
+
+/// 6 位小写字母数字子域。不引 `rand`：纳秒时间 + 进程号做种子的 LCG 足够。
+fn rand_sub() -> String {
+    const ALPH: &[u8] = b"abcdefghijklmnopqrstuvwxyz0123456789";
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos() as u64)
+        .unwrap_or(0x9e37_79b9_7f4a_7c15);
+    let mut x = nanos ^ (std::process::id() as u64).wrapping_mul(0x2545_f491_4f6c_dd1d);
+    let mut s = String::with_capacity(6);
+    for _ in 0..6 {
+        x = x
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
+        s.push(ALPH[((x >> 33) % ALPH.len() as u64) as usize] as char);
+    }
+    s
+}
+
+/// 内置种子线路：随机子域优先（最不容易被封），再排固定子域。
+pub fn seeds() -> Vec<String> {
+    let mut out = Vec::new();
+    for d in SEED_DOMAINS {
+        for _ in 0..SEED_RANDOM {
+            out.push(format!("https://{}.{d}", rand_sub()));
+        }
+        for s in SEED_SUBS {
+            out.push(format!("https://{s}.{d}"));
+        }
+    }
+    out
+}
 
 pub fn fixed() -> Value {
     json!(FIXED
@@ -27,16 +79,25 @@ pub fn fixed() -> Value {
 }
 
 /// 拉地址发布页 → 解析 publish.js → 拼出镜像地址。只在用户点开「线路」时调用。
+///
+/// 发布页打不开（被墙 / 改版）时退回内置种子，界面至少还有可选的线路，
+/// 不会只剩一句「拉取失败」。
 pub async fn mirrors() -> Result<Value, String> {
-    let html = get_text(PUBLISH_PAGE).await?;
+    let html = match get_text(PUBLISH_PAGE).await {
+        Ok(h) => h,
+        Err(e) => return Ok(seed_result(&format!("发布页打不开（{e}），已改用内置种子线路"))),
+    };
     let js_rel = script_src(&html).unwrap_or_else(|| "publish.js".to_string());
     let js_url = absolute(PUBLISH_PAGE, &js_rel);
-    let js = get_text(&js_url).await?;
+    let js = match get_text(&js_url).await {
+        Ok(j) => j,
+        Err(e) => return Ok(seed_result(&format!("发布页脚本拉取失败（{e}），已改用内置种子线路"))),
+    };
 
     let domains = js_array(&js, "var urls");
     let subs = js_array(&js, "var subdomains");
     if domains.is_empty() {
-        return Err("地址发布页格式有变化：没找到镜像域名".to_string());
+        return Ok(seed_result("发布页格式有变化：没找到镜像域名，已改用内置种子线路"));
     }
 
     let mut items: Vec<Value> = Vec::new();
@@ -62,13 +123,33 @@ pub async fn mirrors() -> Result<Value, String> {
         }
     }
     if items.is_empty() {
-        return Err("地址发布页里没有可用的镜像地址".to_string());
+        return Ok(seed_result("发布页里没有可用的镜像地址，已改用内置种子线路"));
     }
 
     Ok(json!({ "source": PUBLISH_PAGE, "script": js_url, "items": items }))
 }
 
+/// 内置种子作为镜像清单返回（带 `fallback` 标记，自动换线据此跳过重复探测）。
+fn seed_result(note: &str) -> Value {
+    let items: Vec<Value> = seeds()
+        .into_iter()
+        .map(|url| {
+            let host = url.trim_start_matches("https://").to_string();
+            json!({ "url": url, "host": host })
+        })
+        .collect();
+    json!({
+        "source": "内置种子",
+        "note": note,
+        "fallback": true,
+        "items": items,
+    })
+}
+
 /// 可达性探测（并发 6 条一组）。只报结果，不做自动切换。
+///
+/// 注意：判据是**真实业务接口**，不是首页。有些线路根路径 200 但 `/api/edge/request`
+/// 是 404（空壳跳转页），只看首页会误报「可用」。
 pub async fn probe(urls: Vec<String>) -> Value {
     let mut out: Vec<Value> = Vec::new();
     for chunk in urls.chunks(6) {
@@ -87,22 +168,129 @@ pub async fn probe(urls: Vec<String>) -> Value {
 }
 
 async fn probe_one(url: String) -> Value {
-    let target = format!("{}/", url.trim_end_matches('/'));
     let started = Instant::now();
-    let res = crate::net::client()
-        .get(&target)
-        .timeout(PROBE_TIMEOUT)
-        .header("Accept", "text/html,application/xhtml+xml")
-        .send()
-        .await;
+    let res = api_ok(&url, PROBE_TIMEOUT).await;
     let ms = started.elapsed().as_millis() as u64;
     match res {
-        Ok(r) => {
-            let status = r.status().as_u16();
-            json!({ "url": url, "ok": status < 400, "status": status, "ms": ms })
-        }
-        Err(e) => json!({ "url": url, "ok": false, "ms": ms, "error": crate::net::err_text(&e) }),
+        Ok(()) => json!({ "url": url, "ok": true, "status": 200, "ms": ms }),
+        Err((Some(code), _)) => json!({ "url": url, "ok": false, "status": code, "ms": ms }),
+        Err((None, e)) => json!({ "url": url, "ok": false, "ms": ms, "error": e }),
     }
+}
+
+/// 打一次边缘信封，判断该线路是否**真的在提供业务接口**。
+///
+/// `Ok(())` 可用；`Err((Some(code), _))` HTTP 通但不是有效接口；`Err((None, _))` 连不上。
+async fn api_ok(url: &str, timeout: Duration) -> Result<(), (Option<u16>, String)> {
+    let origin = url.trim_end_matches('/');
+    let envelope = json!({
+        "method": "GET",
+        "path": PROBE_PATH,
+        "body": "",
+        "content_type": "",
+    });
+    let resp = crate::net::client()
+        .post(format!("{origin}/api/edge/request"))
+        .timeout(timeout)
+        .header("Accept", "application/json")
+        .header("Referer", format!("{origin}/"))
+        .json(&envelope)
+        .send()
+        .await
+        .map_err(|e| (None, crate::net::err_text(&e)))?;
+
+    let status = resp.status();
+    if !status.is_success() {
+        return Err((Some(status.as_u16()), format!("HTTP {status}")));
+    }
+    let code = status.as_u16();
+    let text = resp
+        .text()
+        .await
+        .map_err(|e| (Some(code), crate::net::err_text(&e)))?;
+    // 有效响应一定是 {"status":1,"data":…}；空壳站 / 跳转页返回的是 HTML
+    match serde_json::from_str::<Value>(&text) {
+        Ok(v) if v.get("status").is_some() || v.get("data").is_some() => Ok(()),
+        _ => Err((Some(code), "返回的不是接口信封".to_string())),
+    }
+}
+
+/// 自动换线：先试写死的固定线路，再试地址发布页上的镜像，返回第一条真能跑业务的地址。
+///
+/// 成功即落盘（`line.json`），下次启动直接用它，不会再探一遍。
+/// 整体有 [`AUTO_BUDGET`] 预算，超时返回 `None`，绝不无限卡住首屏。
+pub async fn auto_failover(current: &str) -> Option<String> {
+    match tokio::time::timeout(AUTO_BUDGET, auto_failover_inner(current)).await {
+        Ok(hit) => hit,
+        Err(_) => None,
+    }
+}
+
+async fn auto_failover_inner(current: &str) -> Option<String> {
+    // 1) 写死的固定线路
+    let fixed: Vec<String> = FIXED
+        .iter()
+        .map(|(_, u)| u.to_string())
+        .filter(|u| u != current)
+        .collect();
+    if let Some(hit) = first_ok(&fixed, PROBE_TIMEOUT).await {
+        let _ = crate::net::set_base(&hit);
+        return Some(hit);
+    }
+
+    // 2) 内置种子（不需要任何外部页面，泛解析随机子域）
+    let seed: Vec<String> = seeds().into_iter().filter(|u| u != current).collect();
+    if let Some(hit) = first_ok(&seed, AUTO_PROBE_TIMEOUT).await {
+        let _ = crate::net::set_base(&hit);
+        return Some(hit);
+    }
+
+    // 3) 最后才去抓发布页（这一步本身也可能被墙，且要多花几秒）
+    let Ok(v) = mirrors().await else {
+        return None;
+    };
+    // 返回的是内置种子说明发布页没抓到，而种子在第 2 步已经试过了
+    if v.get("fallback").and_then(|b| b.as_bool()) == Some(true) {
+        return None;
+    }
+    let list: Vec<String> = v
+        .get("items")
+        .and_then(|i| i.as_array())
+        .map(|a| {
+            a.iter()
+                .filter_map(|x| x.get("url").and_then(|u| u.as_str()))
+                .map(|s| s.to_string())
+                .filter(|u| u != current)
+                .take(AUTO_MIRROR_TRY)
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let hit = first_ok(&list, AUTO_PROBE_TIMEOUT).await?;
+    let _ = crate::net::set_base(&hit);
+    Some(hit)
+}
+
+/// 并发 6 条一组探测，返回第一条可用的（同组内按完成顺序）。
+async fn first_ok(urls: &[String], timeout: Duration) -> Option<String> {
+    for chunk in urls.chunks(6) {
+        let mut handles = Vec::new();
+        for u in chunk {
+            let u = u.clone();
+            handles.push(tokio::spawn(async move {
+                match api_ok(&u, timeout).await {
+                    Ok(()) => Some(u),
+                    Err(_) => None,
+                }
+            }));
+        }
+        for h in handles {
+            if let Ok(Some(u)) = h.await {
+                return Some(u);
+            }
+        }
+    }
+    None
 }
 
 async fn get_text(url: &str) -> Result<String, String> {
@@ -276,5 +464,19 @@ var foreverUrls = [
             "https://thu.xxbgwypx.cc".to_string(),
         ];
         println!("{}", serde_json::to_string_pretty(&probe(urls).await).expect("json"));
+    }
+
+    /// 手动跑（要联网，故 ignore）：
+    /// `cargo test --lib lines::tests::auto_failover_live -- --ignored --nocapture`
+    #[tokio::test]
+    #[ignore]
+    async fn auto_failover_live() {
+        let started = Instant::now();
+        let hit = auto_failover(crate::net::DEFAULT_BASE).await;
+        println!(
+            "auto_failover -> {hit:?}  耗时 {}ms",
+            started.elapsed().as_millis()
+        );
+        assert!(hit.is_some(), "应该能自动找到一条可用线路");
     }
 }

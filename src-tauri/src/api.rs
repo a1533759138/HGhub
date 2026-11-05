@@ -79,7 +79,8 @@ pub async fn line_mirrors() -> Result<Value, String> {
     crate::lines::mirrors().await
 }
 
-/// 可达性探测：只报结果，不做自动检查 / 自动切换。
+/// 可达性探测：只报结果，不改当前线路。
+/// （自动换线发生在 [`crate::net::edge`] 里，请求失败时才触发。）
 #[tauri::command]
 pub async fn line_probe(urls: Vec<String>) -> Result<Value, String> {
     crate::net::refresh_client();

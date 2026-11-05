@@ -117,7 +117,14 @@ export type UpdateInfo = {
 
 export type LineItem = { name?: string; url: string; host?: string };
 export type LineState = { base: string; default: string; fixed: LineItem[] };
-export type LineMirrors = { source: string; script?: string; items: LineItem[] };
+export type LineMirrors = {
+  source: string;
+  script?: string;
+  items: LineItem[];
+  /** 发布页抓不到时退回内置种子，这里会有一句说明 */
+  note?: string;
+  fallback?: boolean;
+};
 export type LineProbe = { url: string; ok: boolean; status?: number; ms: number; error?: string };
 
 /** `https://a.b/c` → `a.b`（线路展示用） */

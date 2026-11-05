@@ -103,7 +103,7 @@ fn build_client() -> reqwest::Client {
     let mut builder = reqwest::Client::builder()
         .user_agent(UA)
         .timeout(Duration::from_secs(20))
-        .connect_timeout(Duration::from_secs(10))
+        .connect_timeout(Duration::from_secs(6))
         .gzip(true)
         .brotli(true)
         .pool_idle_timeout(Duration::from_secs(60));
@@ -140,16 +140,62 @@ pub fn is_proxy_error(e: &str) -> bool {
     e.contains("tunnel") || e.contains("proxy")
 }
 
+/// 连接层失败：超时 / 拒绝 / DNS 解析不出来。
+pub fn is_connect_error(e: &str) -> bool {
+    let e = e.to_ascii_lowercase();
+    e.contains("connect")
+        || e.contains("timed out")
+        || e.contains("timeout")
+        || e.contains("refused")
+        || e.contains("dns")
+        || e.contains("unreachable")
+        || e.contains("reset")
+}
+
+/// 这条线路「不可用」：连不上，或者根本没在提供接口。
+///
+/// 后一种很常见：镜像域名过期后变成跳转页 / 空壳站，根路径 200 但
+/// `/api/edge/request` 是 404、405 或 502。这种也算换线的理由。
+pub fn is_line_error(e: &str) -> bool {
+    if is_connect_error(e) {
+        return true;
+    }
+    ["HTTP 404", "HTTP 405", "HTTP 502", "HTTP 503", "HTTP 504"]
+        .iter()
+        .any(|p| e.starts_with(p))
+}
+
+/// 自动换线只跑一次：并发请求共享同一轮探测，失败后 60 秒内不再重试。
+static FAILOVER_LOCK: Lazy<tokio::sync::Mutex<()>> = Lazy::new(|| tokio::sync::Mutex::new(()));
+static FAILOVER_AT: Lazy<std::sync::Mutex<Option<Instant>>> =
+    Lazy::new(|| std::sync::Mutex::new(None));
+
+/// 当前线路挂了，尝试自动切到一条能用的。返回新基址（`None` 表示没找到）。
+async fn failover_once(current: &str) -> Option<String> {
+    let _guard = FAILOVER_LOCK.lock().await;
+    // 别的并发请求可能已经把线路换好了，直接用
+    let now = base();
+    if now != current {
+        return Some(now);
+    }
+    {
+        let mut last = FAILOVER_AT.lock().ok()?;
+        if let Some(t) = *last {
+            if t.elapsed() < Duration::from_secs(60) {
+                return None;
+            }
+        }
+        *last = Some(Instant::now());
+    }
+    crate::lines::auto_failover(current).await
+}
+
 static LAST_HEAL: Lazy<std::sync::Mutex<Option<Instant>>> = Lazy::new(|| std::sync::Mutex::new(None));
 
 /// 请求失败后按需重建客户端：代理隧道错误、连接被拒 / 超时都算「网络环境可能变了」。
 /// 3 秒内只重建一次，批量探测不会反复重建。
 pub fn heal_client(reason: &str) {
-    let connectish = reason.contains("Connect")
-        || reason.contains("timed out")
-        || reason.contains("refused")
-        || reason.contains("dns");
-    if !is_proxy_error(reason) && !connectish {
+    if !is_proxy_error(reason) && !is_connect_error(reason) {
         return;
     }
     let mut last = match LAST_HEAL.lock() {
@@ -255,7 +301,77 @@ where
     Err(last)
 }
 
+/// 真正发一次信封请求（不重试）。
+async fn send_envelope(
+    client: &reqwest::Client,
+    url: &str,
+    referer: &str,
+    envelope: &Value,
+    token: Option<&str>,
+) -> Result<Value, String> {
+    let mut req = client
+        .post(url)
+        .header("Accept", "application/json")
+        .header("Referer", referer)
+        .json(envelope);
+    if let Some(t) = token {
+        if !t.is_empty() {
+            req = req.header("Authorization", format!("Bearer {t}"));
+        }
+    }
+    let resp = req.send().await.map_err(|e| err_text(&e))?;
+    let status = resp.status();
+    let text = resp.text().await.map_err(|e| err_text(&e))?;
+    if status.as_u16() == 401 || status.as_u16() == 403 {
+        return Err("401".to_string());
+    }
+    if !status.is_success() {
+        return Err(format!("HTTP {status}: {}", &text[..text.len().min(160)]));
+    }
+    if text.trim().is_empty() {
+        return Ok(Value::Null);
+    }
+    serde_json::from_str::<Value>(&text).map_err(|e| format!("{e}: {}", &text[..text.len().min(160)]))
+}
+
+/// 单发一次（不重试）：用来**快速**判断这条线路是不是根本不通。
+async fn post_envelope_once(
+    cur: &str,
+    envelope: &Value,
+    token: Option<&str>,
+) -> Result<Value, String> {
+    let client = client();
+    let url = format!("{cur}/api/edge/request");
+    let referer = format!("{cur}/");
+    send_envelope(client.as_ref(), &url, &referer, envelope, token).await
+}
+
+/// 往指定基址发信封请求（含 3 次重试与客户端自愈）。
+async fn post_envelope(cur: &str, envelope: &Value, token: Option<&str>) -> Result<Value, String> {
+    let url = format!("{cur}/api/edge/request");
+    let referer = format!("{cur}/");
+    let envelope = envelope.clone();
+    let token = token.map(|s| s.to_string());
+
+    with_retry(move |client: reqwest::Client| {
+        let envelope = envelope.clone();
+        let token = token.clone();
+        let url = url.clone();
+        let referer = referer.clone();
+        async move {
+            send_envelope(&client, &url, &referer, &envelope, token.as_deref()).await
+        }
+    })
+    .await
+}
+
 /// 业务请求：走边缘信封。
+///
+/// 线路不通时**自动换线再试一次**（固定线路 → 发布页镜像）。换好的地址会落盘，
+/// 所以这是一次性代价：iPhone 上 `huangguoai.com` 被 DNS 污染导致「没有网络」时，
+/// 首次请求会自动落到可用镜像上，而不是永远报错。
+///
+/// 先用**单发**探一次：线路真挂了要立刻换，而不是在死域名上耗完 3 次重试（30 秒）。
 pub async fn edge(
     method: &str,
     path: &str,
@@ -277,42 +393,19 @@ pub async fn edge(
     });
 
     let cur = base();
-    let url = format!("{cur}/api/edge/request");
-    let referer = format!("{cur}/");
-    let token = token.map(|s| s.to_string());
-
-    let value = with_retry(|client: reqwest::Client| {
-        let envelope = envelope.clone();
-        let token = token.clone();
-        let url = url.clone();
-        let referer = referer.clone();
-        async move {
-            let mut req = client
-                .post(&url)
-                .header("Accept", "application/json")
-                .header("Referer", &referer)
-                .json(&envelope);
-            if let Some(t) = token.as_deref() {
-                if !t.is_empty() {
-                    req = req.header("Authorization", format!("Bearer {t}"));
-                }
+    let value = match post_envelope_once(&cur, &envelope, token).await {
+        Ok(v) => v,
+        Err(e) if is_line_error(&e) => match failover_once(&cur).await {
+            Some(next) => {
+                eprintln!("[net] 线路 {cur} 不可用（{e}），已自动切到 {next}");
+                post_envelope(&next, &envelope, token).await?
             }
-            let resp = req.send().await.map_err(|e| err_text(&e))?;
-            let status = resp.status();
-            let text = resp.text().await.map_err(|e| err_text(&e))?;
-            if status.as_u16() == 401 || status.as_u16() == 403 {
-                return Err("401".to_string());
-            }
-            if !status.is_success() {
-                return Err(format!("HTTP {status}: {}", &text[..text.len().min(160)]));
-            }
-            if text.trim().is_empty() {
-                return Ok(Value::Null);
-            }
-            serde_json::from_str::<Value>(&text).map_err(|e| format!("{e}: {}", &text[..text.len().min(160)]))
-        }
-    })
-    .await?;
+            // 没有别的线路可换：可能是瞬时抖动，回到本线路走完整重试
+            None => post_envelope(&cur, &envelope, token).await?,
+        },
+        // 非线路问题（比如 5xx 抖动）：本线路重试即可
+        Err(_) => post_envelope(&cur, &envelope, token).await?,
+    };
 
     if value.is_null() {
         return Ok(Value::Null);
@@ -371,5 +464,32 @@ mod tests {
             "{}",
             serde_json::to_string_pretty(&diagnose().await).expect("json")
         );
+    }
+
+    /// 手动跑（要联网，故 ignore）：
+    /// `cargo test --lib net::tests::edge_auto_failover_live -- --ignored --nocapture`
+    ///
+    /// 从**被 DNS 污染的默认线路**起步，验证一次业务请求能否自动换线拿到数据。
+    /// 这就是 iPhone 上「显示没有网络」的复现场景。
+    #[tokio::test]
+    #[ignore]
+    async fn edge_auto_failover_live() {
+        let _ = set_base(DEFAULT_BASE);
+        let started = Instant::now();
+        let v = edge("GET", "/api/videos?page=1&size=1", None, None).await;
+        println!("耗时 {}ms", started.elapsed().as_millis());
+        println!("当前线路: {}", base());
+        match v {
+            Ok(v) => {
+                let n = v
+                    .get("items")
+                    .and_then(|i| i.as_array())
+                    .map(|a| a.len())
+                    .unwrap_or(0);
+                println!("拿到 {n} 条视频");
+                assert!(n > 0, "换线后应该能拿到数据");
+            }
+            Err(e) => panic!("请求失败: {e}"),
+        }
     }
 }

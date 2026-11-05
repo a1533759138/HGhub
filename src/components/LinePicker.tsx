@@ -37,6 +37,7 @@ export default function LinePicker({ open, onClose }: { open: boolean; onClose: 
   const [state, setState] = useState<LineState | null>(null);
   const [mirrors, setMirrors] = useState<LineItem[] | null>(null);
   const [mirrorErr, setMirrorErr] = useState("");
+  const [mirrorNote, setMirrorNote] = useState("");
   const [loadingMirrors, setLoadingMirrors] = useState(false);
   const [probes, setProbes] = useState<ProbeMap>({});
   const [probing, setProbing] = useState("");
@@ -52,8 +53,10 @@ export default function LinePicker({ open, onClose }: { open: boolean; onClose: 
     try {
       const res = await api.lineMirrors();
       setMirrors(res?.items || []);
+      setMirrorNote(res?.note || "");
     } catch (e) {
       setMirrors([]);
+      setMirrorNote("");
       setMirrorErr((e as Error).message || "镜像线路获取失败");
     } finally {
       setLoadingMirrors(false);
@@ -132,12 +135,15 @@ export default function LinePicker({ open, onClose }: { open: boolean; onClose: 
 
         <div className="flex items-center gap-2 px-1 mt-4 mb-1.5">
           <span className="text-[10.5px] font-semibold text-dim tracking-wide">镜像线路</span>
-          <span className="text-[10px] text-dim">huangguoai.pages.dev · 一般可直连</span>
+          <span className="text-[10px] text-dim">随机子域 · 一般可直连</span>
           <button onClick={() => { void readMirrors(); }} disabled={loadingMirrors}
             className="ml-auto inline-flex items-center gap-1 text-[10.5px] text-primary pressable disabled:opacity-50">
             <IRefresh size={12} />{loadingMirrors ? "获取中…" : "刷新"}
           </button>
         </div>
+        {!!mirrorNote && !loadingMirrors && (
+          <div className="px-1 mb-1.5 text-[10px] text-amber-400/80 leading-relaxed break-all">{mirrorNote}</div>
+        )}
         <div className="rounded-(--r-md) bg-s2 divide-y divide-s3 overflow-hidden">
           {loadingMirrors && <div className="flex justify-center py-6"><div className="w-6 h-6 spinner" /></div>}
           {!loadingMirrors && mirrorErr && (
@@ -164,7 +170,8 @@ export default function LinePicker({ open, onClose }: { open: boolean; onClose: 
         )}
 
         <div className="text-[10px] text-dim leading-relaxed px-1 mt-4">
-          切换后立即生效，请求链路与数据模型不变。不做自动检测 / 自动切换，只有点「检测」时才探测一次。
+          切换后立即生效，请求链路与数据模型不变。线路连不上时会自动换一条能用的并记住，
+          也可以在这里手动指定。
         </div>
       </div>
     </div>
