@@ -1,6 +1,6 @@
 //! 业务命令：登录 / 列表 / 详情 / 播放 / 互动。
 
-use crate::net::{edge, BASE};
+use crate::net::{base, edge};
 use crate::session::SessionStore;
 use serde_json::{json, Value};
 use tauri::State;
@@ -53,6 +53,153 @@ pub async fn net_diag() -> Result<Value, String> {
     Ok(crate::net::diagnose().await)
 }
 
+/* ───────────────────────── 线路（数据源） ───────────────────────── */
+
+/// 当前线路 + 固定线路清单（镜像线路另外按需拉取）。
+#[tauri::command]
+pub async fn line_state() -> Result<Value, String> {
+    Ok(json!({
+        "base": base(),
+        "default": crate::net::DEFAULT_BASE,
+        "fixed": crate::lines::fixed(),
+    }))
+}
+
+/// 手动切换线路：立即生效并落盘（下次启动沿用）。
+#[tauri::command]
+pub async fn line_set(url: String) -> Result<String, String> {
+    crate::net::set_base(&url)
+}
+
+/// 从地址发布页抓镜像线路（只在用户点开「线路」时调用）。
+#[tauri::command]
+pub async fn line_mirrors() -> Result<Value, String> {
+    // 用户手动点「刷新 / 打开线路」时重新读一次系统代理：代理软件开关过之后旧客户端会卡死
+    crate::net::refresh_client();
+    crate::lines::mirrors().await
+}
+
+/// 可达性探测：只报结果，不做自动检查 / 自动切换。
+#[tauri::command]
+pub async fn line_probe(urls: Vec<String>) -> Result<Value, String> {
+    crate::net::refresh_client();
+    Ok(crate::lines::probe(urls).await)
+}
+
+/* ───────────────────────── 更新检查 ───────────────────────── */
+
+const REPO: &str = "Minireel/HGhub";
+
+fn ver_parts(v: &str) -> Vec<u64> {
+    v.trim()
+        .trim_start_matches(['v', 'V'])
+        .split(['.', '-', '+'])
+        .map(|s| s.trim().parse::<u64>().unwrap_or(0))
+        .collect()
+}
+
+/// 只比较数字段：`v1.2.0` > `1.1.9`；解析不出的段按 0 处理。
+fn is_newer(latest: &str, current: &str) -> bool {
+    let (a, b) = (ver_parts(latest), ver_parts(current));
+    for i in 0..a.len().max(b.len()) {
+        let x = *a.get(i).unwrap_or(&0);
+        let y = *b.get(i).unwrap_or(&0);
+        if x != y {
+            return x > y;
+        }
+    }
+    false
+}
+
+/// 对比 GitHub Release 的 tag 与当前版本（未认证 60 次/小时/IP，够用）。
+#[tauri::command]
+pub async fn check_update() -> Result<Value, String> {
+    let current = env!("CARGO_PKG_VERSION").to_string();
+    let url = format!("https://api.github.com/repos/{REPO}/releases/latest");
+    let resp = crate::net::client()
+        .get(&url)
+        .header("Accept", "application/vnd.github+json")
+        .timeout(std::time::Duration::from_secs(12))
+        .send()
+        .await
+        .map_err(|e| crate::net::err_text(&e))?;
+
+    let status = resp.status();
+    if status.as_u16() == 404 {
+        // 还没发过 release
+        return Ok(json!({
+            "current": current, "latest": "", "has_update": false,
+            "url": format!("https://github.com/{REPO}/releases"),
+        }));
+    }
+    if !status.is_success() {
+        return Err(format!("GitHub 返回 HTTP {status}"));
+    }
+
+    let v: Value = resp.json().await.map_err(|e| crate::net::err_text(&e))?;
+    let tag = v.get("tag_name").and_then(|x| x.as_str()).unwrap_or("").to_string();
+    let html = v
+        .get("html_url")
+        .and_then(|x| x.as_str())
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| format!("https://github.com/{REPO}/releases"));
+    let notes = v.get("body").and_then(|x| x.as_str()).unwrap_or("");
+
+    Ok(json!({
+        "current": current,
+        "latest": tag.trim_start_matches(['v', 'V']).to_string(),
+        "tag": tag,
+        "has_update": !tag.is_empty() && is_newer(&tag, &current),
+        "url": html,
+        "name": v.get("name").and_then(|x| x.as_str()).unwrap_or(""),
+        "published_at": v.get("published_at").and_then(|x| x.as_str()).unwrap_or(""),
+        "notes": notes.chars().take(800).collect::<String>(),
+    }))
+}
+
+/// 用系统默认浏览器打开链接（只允许 http/https）。
+#[tauri::command]
+pub async fn open_url(url: String) -> Result<(), String> {
+    if !(url.starts_with("https://") || url.starts_with("http://")) {
+        return Err("只允许打开 http(s) 链接".to_string());
+    }
+    open_external(&url)
+}
+
+#[cfg(target_os = "windows")]
+fn open_external(url: &str) -> Result<(), String> {
+    use std::os::windows::process::CommandExt;
+    std::process::Command::new("cmd")
+        .args(["/C", "start", "", url])
+        .creation_flags(0x0800_0000) // CREATE_NO_WINDOW，别闪一下黑框
+        .spawn()
+        .map(|_| ())
+        .map_err(|e| e.to_string())
+}
+
+#[cfg(target_os = "macos")]
+fn open_external(url: &str) -> Result<(), String> {
+    std::process::Command::new("open")
+        .arg(url)
+        .spawn()
+        .map(|_| ())
+        .map_err(|e| e.to_string())
+}
+
+#[cfg(all(unix, not(any(target_os = "macos", target_os = "android"))))]
+fn open_external(url: &str) -> Result<(), String> {
+    std::process::Command::new("xdg-open")
+        .arg(url)
+        .spawn()
+        .map(|_| ())
+        .map_err(|e| e.to_string())
+}
+
+#[cfg(target_os = "android")]
+fn open_external(_url: &str) -> Result<(), String> {
+    Err("移动端请手动在浏览器打开".to_string())
+}
+
 /* ───────────────────────── 会话 ───────────────────────── */
 
 #[tauri::command]
@@ -60,7 +207,7 @@ pub async fn app_boot(state: State<'_, Api>) -> Result<Value, String> {
     Ok(json!({
         "user": state.session.user(),
         "logged_in": state.session.token().is_some(),
-        "base": BASE,
+        "base": base(),
     }))
 }
 
@@ -310,4 +457,18 @@ pub async fn api_post_comments(
     state
         .get(&format!("/api/posts/{id}/comments?page={page}&size={size}"))
         .await
+}
+#[cfg(test)]
+mod tests {
+    use super::is_newer;
+
+    #[test]
+    fn compares_versions() {
+        assert!(is_newer("v1.0.2", "1.0.1"));
+        assert!(is_newer("v1.1", "1.0.9"));
+        assert!(is_newer("1.0.10", "1.0.9"));
+        assert!(!is_newer("v1.0.1", "1.0.1"));
+        assert!(!is_newer("v0.9.9", "1.0.1"));
+        assert!(!is_newer("", "1.0.1"));
+    }
 }

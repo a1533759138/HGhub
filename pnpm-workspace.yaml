@@ -1,0 +1,15 @@
+# pnpm 11 起：
+#   * `package.json` 的 `pnpm.*` 字段、以及 `.npmrc` 里非 auth/registry 的设置都不再被读取，
+#     安装相关设置必须写在这里（pnpm 10 也读这份文件，两处并存不冲突，.npmrc 留给 pnpm 10）。
+#   * 构建脚本白名单由 `allowBuilds` 取代 `onlyBuiltDependencies`（旧键保留给 pnpm 10 的 CI）。
+
+# 工程常放在 exFAT 盘（不支持符号链接），必须 hoisted；否则 pnpm 11 会 ERR_PNPM_EISDIR。
+nodeLinker: hoisted
+shamefullyHoist: true
+strictPeerDependencies: false
+
+# esbuild 需要跑安装脚本，否则 vite build 缺少二进制。
+onlyBuiltDependencies:
+  - esbuild
+allowBuilds:
+  esbuild: true

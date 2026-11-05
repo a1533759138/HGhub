@@ -1,4 +1,5 @@
 mod api;
+mod lines;
 mod media;
 mod net;
 mod session;
@@ -6,13 +7,8 @@ mod session;
 use api::Api;
 use tauri::Manager;
 
-/// 自定义协议 hg 在 WebView 里的源：Windows / Android 是 http://<scheme>.localhost，
-/// iOS（WKWebView）是 <scheme>://localhost。播放列表里的分片地址按它改写，必须和前端 api.ts 的 LOCAL 一致。
-/// 注意：不能拿请求 URI 的 scheme 来拼（各平台到这里都是 "hg"），否则 Windows / Android 的 WebView 解析不了。
-#[cfg(target_os = "ios")]
-const LOCAL_ORIGIN: &str = "hg://localhost";
-#[cfg(not(target_os = "ios"))]
-const LOCAL_ORIGIN: &str = "http://hg.localhost";
+// 自定义协议基址（LOCAL_ORIGIN）统一定义在 media.rs：Windows / Android 是 http://hg.localhost，
+// iOS / macOS 是 hg://localhost。必须与前端 src/api.ts 的 LOCAL 保持一致。
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -21,6 +17,8 @@ pub fn run() {
         .setup(|app| {
             if let Ok(dir) = app.path().app_data_dir() {
                 let _ = std::fs::create_dir_all(&dir);
+                // 上次选择的线路（设置 → 线路）在启动时恢复
+                net::bind_base(&dir);
                 let state: tauri::State<Api> = app.state();
                 state.session.bind(dir);
             }
@@ -30,8 +28,11 @@ pub fn run() {
             let uri = request.uri().clone();
             let path = uri.path().to_string();
             let query = uri.query().unwrap_or("").to_string();
+            // 自定义协议基址随平台不同，统一定义在 media::LOCAL_ORIGIN
+            // （Windows/Android 是 http://<scheme>.localhost，macOS/iOS/Linux 是 <scheme>://localhost）。
+            // 它同时是 m3u8 分片/key 改写用的前缀，必须与前端 src/api.ts 的 LOCAL 一致。
             tauri::async_runtime::spawn(async move {
-                let resp = media::handle(&path, &query, LOCAL_ORIGIN).await;
+                let resp = media::handle(&path, &query, media::LOCAL_ORIGIN).await;
                 responder.respond(resp);
             });
         })
@@ -39,6 +40,12 @@ pub fn run() {
             api::app_boot,
             api::debug_log,
             api::net_diag,
+            api::line_state,
+            api::line_set,
+            api::line_mirrors,
+            api::line_probe,
+            api::check_update,
+            api::open_url,
             api::api_login,
             api::api_register,
             api::api_logout,

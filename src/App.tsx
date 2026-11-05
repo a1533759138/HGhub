@@ -1,17 +1,18 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { useStore, type Page, type Tab } from "./store";
-import { selfTest, mediaPlaybackProbe } from "./api";
+import { selfTest } from "./api";
 import { addPluginListener, invoke } from "@tauri-apps/api/core";
 import { runBack } from "./back";
 import Home from "./pages/Home";
 import Search, { RankPage } from "./pages/Search";
 import Category, { ChannelPage } from "./pages/Category";
 import Profile from "./pages/Profile";
+import SettingsPage from "./pages/Settings";
 import Feed from "./components/Feed";
 import { PostsPage, PostDetail } from "./pages/Posts";
 import LoginModal from "./components/LoginModal";
 import { ToastHost } from "./components/ui";
-import { WindowsRail, WindowsTitleBar } from "./components/WindowsChrome";
+import { DesktopRail, DesktopTitleBar } from "./components/DesktopChrome";
 import ResizeHandles from "./components/ResizeHandles";
 import { IGrid, IGridF, IHome, IHomeF, ISearch, IUser, IUserF, Logo } from "./icons";
 
@@ -27,24 +28,42 @@ const TABS: { k: Tab; label: string }[] = [
 const TAB_H = { android: 48, ios: 62 } as const;
 
 function TabBar() {
-  const { tab, setTab, platform } = useStore();
+  const { tab, setTab, theme, platform } = useStore();
+  /* iOS 用悬浮胶囊底栏（CSS 仿液态玻璃），其它平台走下面的细瘦纯文字分栏 */
   if (platform === "ios") return <GlassTabBar />;
-  const onVideo = tab === "home";
+  const items: { k: Tab; label: string }[] = [
+    { k: "home", label: "首页" },
+    { k: "search", label: "搜索" },
+    { k: "category", label: "分类" },
+    { k: "profile", label: "我的" },
+  ];
+  /* 细瘦纯文字分栏：只有选中项高亮，没有指示点。
+     首页是沉浸视频 → 底栏压深色；搜索/分类/我的 是浅色内容页 →
+     浅色主题下底栏跟着换成浅色，深色主题保持深色。 */
+  const overVideo = tab === "home";
+  const lightBar = !overVideo && theme === "light";
   return (
-    <nav className={`absolute bottom-0 inset-x-0 z-30 ${onVideo ? "" : "bg-s2/95 elev-up"}`}
-      style={{ paddingBottom: "var(--sab, 0px)" }}>
-      <div className="h-[42px] flex items-center px-1">
-        {TABS.map(({ k, label }) => {
+    <nav className="hg-tabbar absolute bottom-0 inset-x-0 z-30"
+      style={{
+        paddingBottom: "var(--sab, 0px)",
+        background: lightBar ? "rgba(250, 250, 250, .97)" : overVideo ? "#000000" : "#141414",
+        borderTop: lightBar ? "1px solid rgba(0,0,0,.08)" : overVideo ? "none" : "1px solid rgba(255,255,255,.07)",
+        boxShadow: lightBar ? "0 -2px 14px rgba(0,0,0,.05)" : "none",
+      }}>
+      <div className="h-[40px] flex items-center px-1">
+        {items.map(({ k, label }) => {
           const on = tab === k;
           return (
-            <button key={k} onClick={() => setTab(k)} className="flex-1 h-full flex flex-col items-center justify-center pressable">
-              <span className={`text-[13px] leading-none transition-colors duration-200 ${on
-                ? (onVideo ? "font-bold text-white" : "font-bold text-on")
-                : (onVideo ? "font-normal text-white/55" : "font-normal text-mut")}`}
-                style={onVideo ? { textShadow: "0 1px 8px rgba(0,0,0,.7)" } : undefined}>
+            <button key={k} onClick={() => setTab(k)} className="flex-1 h-full flex items-center justify-center pressable">
+              <span className="text-[12.5px] leading-none transition-colors duration-200"
+                style={{
+                  fontWeight: on ? 700 : 400,
+                  color: lightBar
+                    ? (on ? "var(--p-primary)" : "rgba(0,0,0,.45)")
+                    : (on ? "#ffffff" : "rgba(255,255,255,.6)"),
+                }}>
                 {label}
               </span>
-              <span className={`mt-[5px] w-[3px] h-[3px] rounded-full transition-opacity duration-200 ${on ? (onVideo ? "bg-white" : "bg-primary") : "opacity-0"}`} />
             </button>
           );
         })}
@@ -92,11 +111,13 @@ function StackPage({ page, onBack, wide, top, bottomInset }: {
   if (page.kind === "feed") {
     return (
       <Feed videoIds={page.videoIds} startIndex={page.index} title={page.title} kind={page.feedKind || "video"}
+        startEp={page.startEp} startTime={page.startTime}
         mode="context" active={top} bottomInset={bottomInset} onBack={onBack} />
     );
   }
   if (page.kind === "channel") return <ChannelPage cate={page.cate} name={page.name} onBack={onBack} wide={wide} />;
   if (page.kind === "ranks") return <RankPage onBack={onBack} wide={wide} />;
+  if (page.kind === "settings") return <SettingsPage onBack={onBack} wide={wide} />;
   if (page.kind === "posts") return <PostsPage onBack={onBack} wide={wide} />;
   if (page.kind === "post") return <PostDetail id={page.id} onBack={onBack} />;
   return null;
@@ -106,7 +127,7 @@ function StackPage({ page, onBack, wide, top, bottomInset }: {
 function AppBody() {
   const { platform, tab, setTab, stack, pop, loginOpen, setLoginOpen, fs } = useStore();
   const mainRef = useRef<HTMLDivElement>(null);
-  const [wide, setWide] = useState(platform === "windows");
+  const [wide, setWide] = useState(platform !== "android");
   const [collapsed, setCollapsed] = useState(false);
 
   useLayoutEffect(() => {
@@ -147,7 +168,7 @@ function AppBody() {
 
   return (
     <div className={`absolute inset-0 flex bg-canvas plat-${platform}`}>
-      {platform === "windows" && <WindowsRail collapsed={collapsed} />}
+      {platform !== "android" && <DesktopRail collapsed={collapsed} />}
       <div ref={mainRef} className="relative flex-1 min-w-0 overflow-hidden win-main">
         <div className={vis("home")}><Home active={pageActive && tab === "home"} bottomInset={bottomInset} /></div>
         <div className={vis("search")}><Search active={pageActive && tab === "search"} wide={wide} /></div>
@@ -166,23 +187,24 @@ function AppBody() {
   );
 }
 
-/* ============ 桌面窗口壳 ============ */
+/* ============ 桌面窗口壳（Windows / macOS）============ */
 function DesktopShell() {
   const [collapsed, setCollapsed] = useState(false);
-  const theater = useStore().theater;
+  const { theater, platform } = useStore();
   return (
-    <div className="absolute inset-0 flex flex-col bg-canvas win-root">
-      <WindowsTitleBar collapsed={collapsed} onToggle={() => setCollapsed((c) => !c)} />
+    <div className={`absolute inset-0 flex flex-col bg-canvas win-root plat-${platform}`}>
+      <DesktopTitleBar collapsed={collapsed} onToggle={() => setCollapsed((c) => !c)} />
       <div className="relative flex-1 min-h-0">
         <ShellInner collapsed={collapsed || theater} theater={theater} />
       </div>
-      <ResizeHandles />
+      {/* 边缘缩放热区只对无边框窗口（Windows）有效，macOS 走原生窗口边框 */}
+      {platform === "windows" && <ResizeHandles />}
     </div>
   );
 }
 
 function ShellInner({ collapsed, theater }: { collapsed: boolean; theater: boolean }) {
-  const { stack, pop, loginOpen, setLoginOpen, tab, setTab } = useStore();
+  const { stack, pop, loginOpen, setLoginOpen, tab, setTab, platform } = useStore();
   const mainRef = useRef<HTMLDivElement>(null);
   const [wide, setWide] = useState(true);
 
@@ -217,8 +239,8 @@ function ShellInner({ collapsed, theater }: { collapsed: boolean; theater: boole
   const pageActive = stack.length === 0 && !loginOpen;
 
   return (
-    <div className="absolute inset-0 flex bg-canvas plat-windows">
-      {!theater && <WindowsRail collapsed={collapsed} />}
+    <div className={`absolute inset-0 flex bg-canvas plat-${platform}`}>
+      {!theater && <DesktopRail collapsed={collapsed} />}
       <div ref={mainRef} className={`relative flex-1 min-w-0 overflow-hidden win-main ${theater ? "is-theater-main" : ""}`}>
         <div className={vis("home")}><Home active={pageActive && tab === "home"} bottomInset={14} /></div>
         <div className={vis("search")}><Search active={pageActive && tab === "search"} wide={wide} /></div>
@@ -293,7 +315,7 @@ export default function App() {
 
   return (
     <>
-      {platform === "windows" ? <DesktopShell /> : <MobileShell />}
+      {platform === "android" ? <MobileShell /> : <DesktopShell />}
       <LoginModal />
       <ToastHost />
       {/* 登录遮罩键盘处理占位 */}

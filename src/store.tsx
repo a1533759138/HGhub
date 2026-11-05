@@ -3,7 +3,7 @@ import { api, platform as envPlatform } from "./api";
 import type { User } from "./types";
 
 /** android / ios 都走移动端布局，只有 android 有硬件返回键 */
-export type Platform = "android" | "ios" | "windows";
+export type Platform = "android" | "ios" | "windows" | "macos";
 export type Theme = "dark" | "light";
 export type Tab = "home" | "search" | "category" | "profile";
 
@@ -16,28 +16,36 @@ export type FeedContext = {
   title: string;
   source: string;
   feedKind?: "video" | "post";
+  /** 从观看记录续播：起始集数与秒数 */
+  startEp?: number;
+  startTime?: number;
 };
 
 export type Page =
   | FeedContext
   | { kind: "channel"; key: string; cate: string; name: string }
   | { kind: "ranks"; key: string }
+  | { kind: "settings"; key: string }
   | { kind: "posts"; key: string }
   | { kind: "post"; key: string; id: number };
 
 export type PageInput =
-  | { kind: "feed"; videoIds: number[]; index: number; title: string; source?: string; feedKind?: "video" | "post" }
+  | { kind: "feed"; videoIds: number[]; index: number; title: string; source?: string; feedKind?: "video" | "post"; startEp?: number; startTime?: number }
   | { kind: "channel"; cate: string; name: string }
   | { kind: "ranks" }
+  | { kind: "settings" }
   | { kind: "posts" }
   | { kind: "post"; id: number };
 
 export type Toast = { id: number; msg: string; icon?: "ok" | "heart" | "star" | "info" };
 
+/** 观看记录：看到第几集、第几秒（`dur` 用来判断是否已看完） */
+export type WatchProgress = { id: number; ep: number; t: number; dur: number; at: number };
+
 type Persist = {
   likes: number[];
   favs: number[];
-  history: number[];
+  history: WatchProgress[];
   follows: number[];
   muted: boolean;
   volume: number;
@@ -50,11 +58,29 @@ const DEFAULTS: Persist = {
   muted: true, volume: 0.7, searchHist: [],
 };
 
+/** 旧版本 history 是 number[]，读出来时升级成带进度的结构 */
+function normalizeHistory(raw: unknown): WatchProgress[] {
+  if (!Array.isArray(raw)) return [];
+  const out: WatchProgress[] = [];
+  raw.forEach((item, i) => {
+    if (typeof item === "number") {
+      out.push({ id: item, ep: 1, t: 0, dur: 0, at: Date.now() - i });
+      return;
+    }
+    const h = item as Partial<WatchProgress> | null;
+    if (h && typeof h.id === "number") {
+      out.push({ id: h.id, ep: Number(h.ep) || 1, t: Number(h.t) || 0, dur: Number(h.dur) || 0, at: Number(h.at) || Date.now() - i });
+    }
+  });
+  return out;
+}
+
 function loadPersist(): Persist {
   try {
     const raw = localStorage.getItem(LS);
     if (!raw) return DEFAULTS;
-    return { ...DEFAULTS, ...(JSON.parse(raw) as Partial<Persist>) };
+    const p = { ...DEFAULTS, ...(JSON.parse(raw) as Partial<Persist>) };
+    return { ...p, history: normalizeHistory(p.history) };
   } catch {
     return DEFAULTS;
   }
@@ -81,13 +107,13 @@ type Store = {
   user: User | null; setUser: (u: User | null) => void;
   loginOpen: boolean; setLoginOpen: (b: boolean) => void;
   logout: () => Promise<void>;
-  likes: number[]; favs: number[]; history: number[]; follows: number[];
+  likes: number[]; favs: number[]; history: WatchProgress[]; follows: number[];
   isLiked: (id: number) => boolean; isFav: (id: number) => boolean;
   toggleLikeLocal: (id: number) => boolean;
   toggleFavLocal: (id: number) => boolean;
-  addHistory: (id: number) => void;
+  /** 记一条观看记录；`ep/t/dur` 省略时保留原进度，`ep` 变了就把进度归零 */
+  addHistory: (id: number, ep?: number, t?: number, dur?: number) => void;
   clearHistory: () => void;
-  clearLocal: () => void;
   toggleFollowLocal: (uid: number) => boolean;
   theater: boolean; setTheater: (v: boolean | ((p: boolean) => boolean)) => void;
   fs: boolean; setFs: (v: boolean | ((p: boolean) => boolean)) => void;
@@ -164,11 +190,22 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     });
     return on;
   }, []);
-  const addHistory = useCallback((id: number) => {
-    setP((s) => ({ ...s, history: [id, ...s.history.filter((x) => x !== id)].slice(0, 80) }));
+  const addHistory = useCallback((id: number, ep?: number, t?: number, dur?: number) => {
+    if (!id) return;
+    setP((s) => {
+      const prev = s.history.find((x) => x.id === id);
+      const epChanged = ep !== undefined && prev !== undefined && prev.ep !== ep;
+      const entry: WatchProgress = {
+        id,
+        ep: ep ?? prev?.ep ?? 1,
+        t: epChanged ? 0 : (t ?? prev?.t ?? 0),
+        dur: dur ?? prev?.dur ?? 0,
+        at: Date.now(),
+      };
+      return { ...s, history: [entry, ...s.history.filter((x) => x.id !== id)].slice(0, 80) };
+    });
   }, []);
   const clearHistory = useCallback(() => setP((s) => ({ ...s, history: [] })), []);
-  const clearLocal = useCallback(() => setP((s) => ({ ...s, likes: [], favs: [], history: [], searchHist: [] })), []);
   const addSearch = useCallback((q: string) => {
     const t = q.trim();
     if (!t) return;
@@ -206,12 +243,12 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     likes: p.likes, favs: p.favs, history: p.history, follows: p.follows,
     isLiked: (id) => p.likes.includes(id),
     isFav: (id) => p.favs.includes(id),
-    toggleLikeLocal, toggleFavLocal, toggleFollowLocal, addHistory, clearHistory, clearLocal,
+    toggleLikeLocal, toggleFavLocal, toggleFollowLocal, addHistory, clearHistory,
     muted: p.muted, setMuted, volume: p.volume, setVolume, theater, setTheater, fs, setFs,
     searchHist: p.searchHist, addSearch, clearSearchHist,
     toasts, toast,
   }), [theme, tab, setTab, stack, push, pop, user, loginOpen, logout,
-    p, toggleLikeLocal, toggleFavLocal, toggleFollowLocal, addHistory, clearHistory, clearLocal,
+    p, toggleLikeLocal, toggleFavLocal, toggleFollowLocal, addHistory, clearHistory,
     setMuted, setVolume, addSearch, clearSearchHist, toasts, toast, theater, setTheater, fs, setFs]);
 
   return <Ctx.Provider value={value}>{children}</Ctx.Provider>;

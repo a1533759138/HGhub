@@ -8,15 +8,23 @@ import type {
 /** 应用版本（构建时由 vite.config.ts 从 package.json 注入） */
 export const APP_VERSION = __APP_VERSION__;
 
-export const isAndroid = /Android/i.test(navigator.userAgent);
+const ua = navigator.userAgent;
+export const isAndroid = /Android/i.test(ua);
 /** iPadOS 的 WKWebView 默认报桌面 UA（Macintosh），靠触点数区分 */
-export const isIOS = /iPhone|iPad|iPod/i.test(navigator.userAgent)
-  || (/Macintosh/i.test(navigator.userAgent) && navigator.maxTouchPoints > 1);
-export const platform: "android" | "ios" | "windows" = isAndroid ? "android" : isIOS ? "ios" : "windows";
+export const isIOS = /iPhone|iPad|iPod/i.test(ua)
+  || (/Macintosh/i.test(ua) && navigator.maxTouchPoints > 1);
+export const isMacos = !isIOS && /Macintosh|Mac OS X/i.test(ua);
+export const platform: "android" | "ios" | "windows" | "macos" =
+  isAndroid ? "android" : isIOS ? "ios" : isMacos ? "macos" : "windows";
 
-/** 自定义协议：Windows 与 Android 是 http://<scheme>.localhost，iOS（WKWebView）是 <scheme>://localhost。
- *  必须和 src-tauri/src/lib.rs 的 LOCAL_ORIGIN 一致：播放列表里的分片地址按它改写。 */
-export const LOCAL = isIOS ? "hg://localhost" : "http://hg.localhost";
+/** 自定义协议地址随平台不同（见 tauri `register_asynchronous_uri_scheme_protocol` 文档）：
+ *  Windows / Android → `http://<scheme>.localhost`
+ *  macOS / iOS / Linux → `<scheme>://localhost`
+ *  Rust 侧 `src-tauri/src/media.rs` 的 LOCAL_ORIGIN 必须与此一致。 */
+export const LOCAL = isIOS || isMacos ? "hg://localhost" : "http://hg.localhost";
+
+/** src 是否已是本地协议地址（避免在详情页把代理地址再包一层） */
+export const isLocalMedia = (src: string) => src.startsWith(`${LOCAL}/`);
 
 /** 封面：经本地协议解密（站点封面是 AES 密文）。 */
 export const cover = (url?: string, _w = 480) =>
@@ -80,6 +88,41 @@ export const api = {
   like: (id: number, ep: number, on: boolean) => call<unknown>("api_like", { id, ep, on }),
   collect: (id: number, on: boolean) => call<unknown>("api_collect", { id, on }),
   follow: (uid: number, on: boolean) => call<unknown>("api_follow", { uid, on }),
+
+  /* 线路（数据源）：固定线路写死在 Rust 侧，镜像线路按需从地址发布页拉取 */
+  lineState: () => call<LineState>("line_state"),
+  lineSet: (url: string) => call<string>("line_set", { url }),
+  lineMirrors: () => call<LineMirrors>("line_mirrors"),
+  lineProbe: (urls: string[]) => call<LineProbe[]>("line_probe", { urls }),
+
+  /* 更新检查：对比 GitHub Release 的 tag */
+  checkUpdate: () => call<UpdateInfo>("check_update"),
+  openUrl: (url: string) => call<void>("open_url", { url }),
+};
+
+/* ── 更新检查 ───────────────────────────────────────────── */
+
+export type UpdateInfo = {
+  current: string;
+  latest: string;
+  tag?: string;
+  has_update: boolean;
+  url: string;
+  name?: string;
+  published_at?: string;
+  notes?: string;
+};
+
+/* ── 线路（数据源） ─────────────────────────────────────── */
+
+export type LineItem = { name?: string; url: string; host?: string };
+export type LineState = { base: string; default: string; fixed: LineItem[] };
+export type LineMirrors = { source: string; script?: string; items: LineItem[] };
+export type LineProbe = { url: string; ok: boolean; status?: number; ms: number; error?: string };
+
+/** `https://a.b/c` → `a.b`（线路展示用） */
+export const hostOf = (url: string) => {
+  try { return new URL(url).host; } catch { return url.replace(/^https?:\/\//, "").replace(/\/.*$/, ""); }
 };
 
 /* ── 自检：验证 webview → 本地协议 → 上游 的取流链路 ───────── */
@@ -151,34 +194,6 @@ export const dur = (s?: number | string) => {
   return `${m}:${String(ss).padStart(2, "0")}`;
 };
 
-/** 真实解码探针：用 hls.js 挂一个隐藏 video，回报 readyState / 尺寸 / 进度。 */
-export async function mediaPlaybackProbe(): Promise<string> {
-  const Hls = (await import("hls.js")).default;
-  const info = await api.play(117, 3);
-  const src = playlist(info.video_url);
-  const video = document.createElement("video");
-  video.muted = true;
-  video.playsInline = true;
-  video.style.cssText = "position:fixed;left:-10px;top:-10px;width:2px;height:2px;opacity:0;pointer-events:none";
-  document.body.appendChild(video);
-  return await new Promise<string>((resolve) => {
-    let done = false;
-    const finish = (note: string) => {
-      if (done) return;
-      done = true;
-      const out = `${note} rs=${video.readyState} w=${video.videoWidth} h=${video.videoHeight} t=${video.currentTime.toFixed(2)} err=${video.error?.code ?? 0}`;
-      try { hls.destroy(); } catch { /* ignore */ }
-      video.remove();
-      resolve(out);
-    };
-    const hls = new Hls({ enableWorker: false });
-    hls.on(Hls.Events.ERROR, (_e, d) => { if (d.fatal) finish(`fatal:${d.details}`); });
-    hls.loadSource(src);
-    hls.attachMedia(video);
-    video.play().catch(() => {});
-    window.setTimeout(() => finish("timeout"), 9000);
-  });
-}
 /** 非 m3u8 媒体（mp4 等）走 /seg 原样透传 */
 export function directMedia(url: string): string {
   return `${LOCAL}/seg?u=${encodeURIComponent(url)}`;

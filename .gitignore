@@ -24,3 +24,6 @@ Thumbs.db
 *.pem
 .env
 .env.*
+
+# API
+docs/API.md

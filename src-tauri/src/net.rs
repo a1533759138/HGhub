@@ -23,9 +23,64 @@ use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine;
 use once_cell::sync::Lazy;
 use serde_json::{json, Value};
+use std::path::PathBuf;
+use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 
-pub const BASE: &str = "https://huangguoai.com";
+/// 默认上游（固定线路 1）。
+pub const DEFAULT_BASE: &str = "https://huangguoai.com";
+
+/// 当前上游基址（不带结尾斜杠）。可在设置里切到固定线路 2 或镜像线路，运行时立即生效。
+static BASE: Lazy<RwLock<String>> = Lazy::new(|| RwLock::new(DEFAULT_BASE.to_string()));
+/// 线路配置落盘位置（应用数据目录/line.json），由 [`bind_base`] 在启动时绑定。
+static BASE_FILE: Lazy<RwLock<Option<PathBuf>>> = Lazy::new(|| RwLock::new(None));
+
+/// 当前上游基址。
+pub fn base() -> String {
+    BASE.read()
+        .map(|b| b.clone())
+        .unwrap_or_else(|_| DEFAULT_BASE.to_string())
+}
+
+/// 规整线路地址：必须是 http(s) 且带 host，去掉结尾斜杠。
+pub fn normalize_base(url: &str) -> Option<String> {
+    let trimmed = url.trim();
+    let parsed = url::Url::parse(trimmed).ok()?;
+    if !matches!(parsed.scheme(), "http" | "https") {
+        return None;
+    }
+    parsed.host_str()?;
+    Some(trimmed.trim_end_matches('/').to_string())
+}
+
+/// 启动时读回上次选择的线路（文件不存在 / 内容坏了就保持默认）。
+pub fn bind_base(dir: &std::path::Path) {
+    let path = dir.join("line.json");
+    if let Ok(text) = std::fs::read_to_string(&path) {
+        if let Ok(v) = serde_json::from_str::<Value>(&text) {
+            if let Some(next) = v.get("base").and_then(|x| x.as_str()).and_then(normalize_base) {
+                if let Ok(mut cur) = BASE.write() {
+                    *cur = next;
+                }
+            }
+        }
+    }
+    if let Ok(mut f) = BASE_FILE.write() {
+        *f = Some(path);
+    }
+}
+
+/// 切换线路并落盘，返回规整后的地址。
+pub fn set_base(url: &str) -> Result<String, String> {
+    let next = normalize_base(url).ok_or_else(|| "线路地址无效（需要 http(s)://域名）".to_string())?;
+    if let Ok(mut cur) = BASE.write() {
+        *cur = next.clone();
+    }
+    if let Some(path) = BASE_FILE.read().ok().and_then(|p| p.clone()) {
+        let _ = std::fs::write(path, json!({ "base": next }).to_string());
+    }
+    Ok(next)
+}
 
 pub const UA: &str =
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
@@ -39,7 +94,12 @@ fn proxy_override() -> Option<String> {
         .filter(|s| !s.is_empty())
 }
 
-pub static CLIENT: Lazy<reqwest::Client> = Lazy::new(|| {
+/// 按**当前**系统代理设置新建一个客户端。
+///
+/// 注意：reqwest 的 `system-proxy` 只在构建时读一次注册表 / 环境变量。代理软件被关掉后，
+/// 旧客户端仍会往 `127.0.0.1:7897` 建隧道，症状是满屏 `tunnel error: failed to create
+/// underlying connection`（浏览器却是通的，因为它每次都重读系统代理）。所以这里允许重建。
+fn build_client() -> reqwest::Client {
     let mut builder = reqwest::Client::builder()
         .user_agent(UA)
         .timeout(Duration::from_secs(20))
@@ -54,7 +114,57 @@ pub static CLIENT: Lazy<reqwest::Client> = Lazy::new(|| {
         }
     }
     builder.build().expect("build http client")
-});
+}
+
+static CLIENT: Lazy<RwLock<Arc<reqwest::Client>>> = Lazy::new(|| RwLock::new(Arc::new(build_client())));
+
+/// 当前 HTTP 客户端（克隆只是 Arc 计数）。
+pub fn client() -> Arc<reqwest::Client> {
+    CLIENT
+        .read()
+        .map(|c| c.clone())
+        .unwrap_or_else(|_| Arc::new(build_client()))
+}
+
+/// 重新读取系统代理。代理软件开关过之后调用；在途请求仍用旧客户端跑完，不影响。
+pub fn refresh_client() {
+    let fresh = Arc::new(build_client());
+    if let Ok(mut cur) = CLIENT.write() {
+        *cur = fresh;
+    }
+}
+
+/// 看起来像代理 / 隧道问题（而不是目标站点本身不可达）。
+pub fn is_proxy_error(e: &str) -> bool {
+    let e = e.to_ascii_lowercase();
+    e.contains("tunnel") || e.contains("proxy")
+}
+
+static LAST_HEAL: Lazy<std::sync::Mutex<Option<Instant>>> = Lazy::new(|| std::sync::Mutex::new(None));
+
+/// 请求失败后按需重建客户端：代理隧道错误、连接被拒 / 超时都算「网络环境可能变了」。
+/// 3 秒内只重建一次，批量探测不会反复重建。
+pub fn heal_client(reason: &str) {
+    let connectish = reason.contains("Connect")
+        || reason.contains("timed out")
+        || reason.contains("refused")
+        || reason.contains("dns");
+    if !is_proxy_error(reason) && !connectish {
+        return;
+    }
+    let mut last = match LAST_HEAL.lock() {
+        Ok(l) => l,
+        Err(_) => return,
+    };
+    if let Some(t) = *last {
+        if t.elapsed() < Duration::from_secs(3) {
+            return;
+        }
+    }
+    *last = Some(Instant::now());
+    drop(last);
+    refresh_client();
+}
 
 /// reqwest 的 `Display` 只有「error sending request for url (...)」，
 /// 真正的原因（dns error / connection refused / invalid peer certificate）
@@ -75,7 +185,8 @@ pub fn err_text(e: &reqwest::Error) -> String {
 
 /// 网络自检：DNS / HTTP / 代理相关环境变量，用于远程定位「打不开」。
 pub async fn diagnose() -> Value {
-    let host = url::Url::parse(BASE)
+    let cur = base();
+    let host = url::Url::parse(&cur)
         .ok()
         .and_then(|u| u.host_str().map(|h| h.to_string()))
         .unwrap_or_default();
@@ -95,7 +206,7 @@ pub async fn diagnose() -> Value {
     };
 
     let started = Instant::now();
-    let http = match CLIENT.get(format!("{BASE}/")).send().await {
+    let http = match client().get(format!("{cur}/")).send().await {
         Ok(r) => json!({
             "status": r.status().as_u16(),
             "ms": started.elapsed().as_millis() as u64,
@@ -107,7 +218,7 @@ pub async fn diagnose() -> Value {
     };
 
     json!({
-        "base": BASE,
+        "base": cur,
         "host": host,
         "dns": dns,
         "http": http,
@@ -121,18 +232,20 @@ pub async fn diagnose() -> Value {
     })
 }
 
-/// 站点偶发 TLS 抖动（实测），统一重试。
+/// 站点偶发 TLS 抖动（实测），统一重试；碰上代理隧道错误就先重建客户端再试
+/// （代理软件开关后旧客户端会一直卡在 tunnel error 上）。
 async fn with_retry<F, Fut, T>(mut f: F) -> Result<T, String>
 where
-    F: FnMut() -> Fut,
+    F: FnMut(reqwest::Client) -> Fut,
     Fut: std::future::Future<Output = Result<T, String>>,
 {
     let mut last = String::from("network error");
     for attempt in 0..3 {
-        match f().await {
+        match f(client().as_ref().clone()).await {
             Ok(v) => return Ok(v),
             Err(e) => {
                 last = e;
+                heal_client(&last);
                 if attempt < 2 {
                     tokio::time::sleep(Duration::from_millis(350 * (attempt as u64 + 1))).await;
                 }
@@ -163,18 +276,21 @@ pub async fn edge(
         "content_type": ctype,
     });
 
-    let url = format!("{BASE}/api/edge/request");
+    let cur = base();
+    let url = format!("{cur}/api/edge/request");
+    let referer = format!("{cur}/");
     let token = token.map(|s| s.to_string());
 
-    let value = with_retry(|| {
+    let value = with_retry(|client: reqwest::Client| {
         let envelope = envelope.clone();
         let token = token.clone();
         let url = url.clone();
+        let referer = referer.clone();
         async move {
-            let mut req = CLIENT
+            let mut req = client
                 .post(&url)
                 .header("Accept", "application/json")
-                .header("Referer", format!("{BASE}/"))
+                .header("Referer", &referer)
                 .json(&envelope);
             if let Some(t) = token.as_deref() {
                 if !t.is_empty() {
@@ -217,12 +333,14 @@ pub async fn edge(
 /// 拉原始字节（图片 / m3u8 / 分片）。
 pub async fn fetch_bytes(url: &str) -> Result<(Option<String>, Vec<u8>), String> {
     let url = url.to_string();
-    with_retry(|| {
+    let referer = format!("{}/", base());
+    with_retry(|client: reqwest::Client| {
         let url = url.clone();
+        let referer = referer.clone();
         async move {
-            let resp = CLIENT
+            let resp = client
                 .get(&url)
-                .header("Referer", format!("{BASE}/"))
+                .header("Referer", &referer)
                 .send()
                 .await
                 .map_err(|e| err_text(&e))?;
