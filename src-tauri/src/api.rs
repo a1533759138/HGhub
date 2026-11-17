@@ -359,9 +359,43 @@ pub async fn api_video(state: State<'_, Api>, id: i64) -> Result<Value, String> 
 
 #[tauri::command]
 pub async fn api_play(state: State<'_, Api>, id: i64, ep: u32) -> Result<Value, String> {
-    state
-        .get(&format!("/api/videos/{id}/play?ep={ep}&page_texts=0"))
-        .await
+    // 上游接口已改版：旧 `GET /api/videos/{id}/play` 现在返回空 video_url，
+    // 播放地址移到新接口 `POST /api/videos/{id}/episodes/{ep}/playback`（无需登录），
+    // 其中 `data.streams.main` 是 m3u8 地址。这里统一转回前端熟悉的 `video_url` 字段。
+    let token = state.token();
+    let data = edge(
+        "POST",
+        &format!("/api/videos/{id}/episodes/{ep}/playback"),
+        None,
+        token.as_deref(),
+    )
+    .await?;
+    let video_url = data
+        .get("streams")
+        .and_then(|s| s.get("main"))
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string())
+        .or_else(|| {
+            data.get("video_url")
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty())
+                .map(|s| s.to_string())
+        })
+        .unwrap_or_default();
+
+    let mut out = json!({
+        "id": data.get("id").and_then(|v| v.as_str()).and_then(|s| s.parse::<i64>().ok()).unwrap_or(id),
+        "ep_num": data.get("ep").and_then(|v| v.as_i64()).unwrap_or(ep as i64),
+        "duration": data.get("duration").and_then(|v| v.as_i64()).unwrap_or(0),
+        "title": data.get("title").and_then(|v| v.as_str()).unwrap_or(""),
+        "video_url": video_url,
+    });
+    // 附带 cdn 鉴权信息（若有，取 m3u8/分片时可能需要）
+    if let Some(cdn) = data.get("cdn") {
+        out["cdn"] = cdn.clone();
+    }
+    Ok(out)
 }
 
 /* ───────────────────────── 评论 / 互动 ───────────────────────── */
