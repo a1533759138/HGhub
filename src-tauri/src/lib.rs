@@ -43,6 +43,8 @@ pub fn run() {
             api::line_state,
             api::line_set,
             api::line_mirrors,
+            api::line_relay,
+            api::line_auto_fastest,
             api::line_probe,
             api::check_update,
             api::open_url,

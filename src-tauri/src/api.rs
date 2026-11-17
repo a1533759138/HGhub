@@ -79,6 +79,21 @@ pub async fn line_mirrors() -> Result<Value, String> {
     crate::lines::mirrors().await
 }
 
+/// 从国内直连中转页（hgai18.com）抓当前直连线路。大陆无需代理，第一优先数据源。
+#[tauri::command]
+pub async fn line_relay() -> Result<Value, String> {
+    crate::net::refresh_client();
+    crate::lines::relay_mirrors().await
+}
+
+/// 自动测速并切换到最快线路：收集固定线路 + 中转页直连线路 + 内置种子，
+/// 全部探测后按延迟切换到最快的一条并落盘。
+#[tauri::command]
+pub async fn line_auto_fastest() -> Result<Value, String> {
+    crate::net::refresh_client();
+    Ok(crate::lines::auto_switch_fastest(&crate::net::base()).await)
+}
+
 /// 可达性探测：只报结果，不改当前线路。
 /// （自动换线发生在 [`crate::net::edge`] 里，请求失败时才触发。）
 #[tauri::command]

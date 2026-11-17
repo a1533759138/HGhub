@@ -97,6 +97,8 @@ export const api = {
   lineState: () => call<LineState>("line_state"),
   lineSet: (url: string) => call<string>("line_set", { url }),
   lineMirrors: () => call<LineMirrors>("line_mirrors"),
+  lineRelay: () => call<LineMirrors>("line_relay"),
+  lineAutoFastest: () => call<{ picked: string; picked_ms: number; tested: number; ok_count: number }>("line_auto_fastest"),
   lineProbe: (urls: string[]) => call<LineProbe[]>("line_probe", { urls }),
 
   /* 更新检查：对比 GitHub Release 的 tag */

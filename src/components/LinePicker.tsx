@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { api, hostOf, isMobile, type LineItem, type LineProbe, type LineState } from "../api";
 import { useStore } from "../store";
 import { Modal, Sheet } from "./ui";
-import { ICheck, IClose, IRefresh, ISettings } from "../icons";
+import { ICheck, IClose, IRefresh, ISettings, IBoltF } from "../icons";
 
 type ProbeMap = Record<string, LineProbe>;
 
@@ -35,6 +35,10 @@ function Row({ item, current, probe, busy, disabled, onPick, onProbe }: {
 export default function LinePicker({ open, onClose }: { open: boolean; onClose: () => void }) {
   const { toast } = useStore();
   const [state, setState] = useState<LineState | null>(null);
+  const [relay, setRelay] = useState<LineItem[] | null>(null);
+  const [relayErr, setRelayErr] = useState("");
+  const [relayNote, setRelayNote] = useState("");
+  const [loadingRelay, setLoadingRelay] = useState(false);
   const [mirrors, setMirrors] = useState<LineItem[] | null>(null);
   const [mirrorErr, setMirrorErr] = useState("");
   const [mirrorNote, setMirrorNote] = useState("");
@@ -42,9 +46,26 @@ export default function LinePicker({ open, onClose }: { open: boolean; onClose: 
   const [probes, setProbes] = useState<ProbeMap>({});
   const [probing, setProbing] = useState("");
   const [switching, setSwitching] = useState("");
+  const [autoPicking, setAutoPicking] = useState(false);
 
   const readState = () => {
     api.lineState().then(setState).catch((e) => toast((e as Error).message || "读取线路失败", "info"));
+  };
+
+  const readRelay = async () => {
+    setLoadingRelay(true);
+    setRelayErr("");
+    try {
+      const res = await api.lineRelay();
+      setRelay(res?.items || []);
+      setRelayNote(res?.note || "");
+    } catch (e) {
+      setRelay([]);
+      setRelayNote("");
+      setRelayErr((e as Error).message || "直连线路获取失败");
+    } finally {
+      setLoadingRelay(false);
+    }
   };
 
   const readMirrors = async () => {
@@ -67,6 +88,7 @@ export default function LinePicker({ open, onClose }: { open: boolean; onClose: 
   useEffect(() => {
     if (!open) return;
     readState();
+    if (relay === null) void readRelay();
     if (mirrors === null) void readMirrors();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open]);
@@ -102,8 +124,29 @@ export default function LinePicker({ open, onClose }: { open: boolean; onClose: 
     }
   };
 
+  /* 自动测速并切到最快线路 */
+  const autoFastest = async () => {
+    if (autoPicking) return;
+    setAutoPicking(true);
+    try {
+      const res = await api.lineAutoFastest();
+      if (res.picked) {
+        setState((s) => (s ? { ...s, base: res.picked } : s));
+        toast(`已切换到最快线路 ${hostOf(res.picked)}（${res.picked_ms}ms）`, "ok");
+      } else {
+        toast("没有找到可用线路", "info");
+      }
+      // 刷新探测结果，让界面显示最新延迟
+      readState();
+    } catch (e) {
+      toast((e as Error).message || "自动测速失败", "info");
+    } finally {
+      setAutoPicking(false);
+    }
+  };
+
   const fixed = state?.fixed || [];
-  const busyAll = !!probing || !!switching;
+  const busyAll = !!probing || !!switching || autoPicking;
 
   const body = (
     <div className="flex flex-col min-h-0" style={{ maxHeight: isMobile ? "74vh" : "min(72vh, 620px)" }}>
@@ -116,8 +159,51 @@ export default function LinePicker({ open, onClose }: { open: boolean; onClose: 
         <button onClick={onClose} aria-label="关闭" className="w-8 h-8 rounded-full bg-s3/80 flex items-center justify-center text-mut pressable"><IClose size={16} /></button>
       </div>
 
+      <div className="shrink-0 px-3 pb-1">
+        <button onClick={autoFastest} disabled={busyAll}
+          className="w-full flex items-center justify-center gap-2 h-9 rounded-(--r-ctl) bg-primary text-[12.5px] font-semibold text-on-primary pressable disabled:opacity-50">
+          <IBoltF size={14} />{autoPicking ? "测速中…" : "自动测速并切换最快线路"}
+        </button>
+      </div>
+
       <div className="flex-1 scroll-y px-3 pb-4">
-        <div className="flex items-center gap-2 px-1 mt-1 mb-1.5">
+        <div className="flex items-center gap-2 px-1 mt-2 mb-1.5">
+          <span className="text-[10.5px] font-semibold text-dim tracking-wide">国内直连线路</span>
+          <span className="text-[10px] text-dim">中转页实时 · 无需代理</span>
+          <button onClick={() => { void readRelay(); }} disabled={loadingRelay}
+            className="ml-auto inline-flex items-center gap-1 text-[10.5px] text-primary pressable disabled:opacity-50">
+            <IRefresh size={12} />{loadingRelay ? "获取中…" : "刷新"}
+          </button>
+        </div>
+        {!!relayNote && !loadingRelay && (
+          <div className="px-1 mb-1.5 text-[10px] text-amber-400/80 leading-relaxed break-all">{relayNote}</div>
+        )}
+        <div className="rounded-(--r-md) bg-s2 divide-y divide-s3 overflow-hidden">
+          {loadingRelay && <div className="flex justify-center py-6"><div className="w-6 h-6 spinner" /></div>}
+          {!loadingRelay && relayErr && (
+            <div className="px-3.5 py-3">
+              <div className="text-[11.5px] text-danger">直连线路获取失败</div>
+              <div className="text-[10.5px] text-mut mt-1 break-all">{relayErr}</div>
+            </div>
+          )}
+          {!loadingRelay && !relayErr && relay?.length === 0 && (
+            <div className="px-3.5 py-3 text-[11px] text-mut">中转页里没有可用的直连地址</div>
+          )}
+          {!loadingRelay && (relay || []).map((it) => (
+            <Row key={it.url} item={it} current={state?.base === it.url} probe={probes[it.url]}
+              busy={probing === it.url} disabled={busyAll} onPick={pick} onProbe={(u) => probe([{ url: u }], u)} />
+          ))}
+        </div>
+        {!loadingRelay && !!relay?.length && (
+          <div className="flex justify-end px-1 mt-2">
+            <button onClick={() => probe(relay, "relay")} disabled={busyAll}
+              className="text-[10.5px] text-primary pressable disabled:opacity-50">
+              {probing === "relay" ? "检测中…" : `全部检测（${relay.length}）`}
+            </button>
+          </div>
+        )}
+
+        <div className="flex items-center gap-2 px-1 mt-4 mb-1.5">
           <span className="text-[10.5px] font-semibold text-dim tracking-wide">固定线路</span>
           <span className="text-[10px] text-dim">需代理 / 非大陆网络</span>
           <button onClick={() => probe(fixed, "fixed")} disabled={busyAll || !fixed.length}
@@ -134,8 +220,8 @@ export default function LinePicker({ open, onClose }: { open: boolean; onClose: 
         </div>
 
         <div className="flex items-center gap-2 px-1 mt-4 mb-1.5">
-          <span className="text-[10.5px] font-semibold text-dim tracking-wide">镜像线路</span>
-          <span className="text-[10px] text-dim">随机子域 · 一般可直连</span>
+          <span className="text-[10.5px] font-semibold text-dim tracking-wide">镜像线路（旧发布页）</span>
+          <span className="text-[10px] text-dim">随机子域 · 兜底</span>
           <button onClick={() => { void readMirrors(); }} disabled={loadingMirrors}
             className="ml-auto inline-flex items-center gap-1 text-[10.5px] text-primary pressable disabled:opacity-50">
             <IRefresh size={12} />{loadingMirrors ? "获取中…" : "刷新"}
@@ -171,7 +257,7 @@ export default function LinePicker({ open, onClose }: { open: boolean; onClose: 
 
         <div className="text-[10px] text-dim leading-relaxed px-1 mt-4">
           切换后立即生效，请求链路与数据模型不变。线路连不上时会自动换一条能用的并记住，
-          也可以在这里手动指定。
+          也可以在这里手动指定。「自动测速」会从中转页实时拉取国内直连线路并切到延迟最低的一条。
         </div>
       </div>
     </div>
