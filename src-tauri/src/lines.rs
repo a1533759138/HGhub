@@ -45,8 +45,9 @@ const PROBE_PATH: &str = "/api/videos?page=1&size=1";
 /// 所以随机子域比写死的子域更难被定点封锁——每次启动换一批就行。
 ///
 /// 注意：主域会随上游迁移而失效，需跟发布页 `publish.js` 里的 `var urls` 保持同步。
-/// 当前（2026-11）：`kozhmami.cc` / `ssenpilj.cc`（旧 `lbvrhyir.cc` 已废弃）。
-const SEED_DOMAINS: [&str; 2] = ["kozhmami.cc", "ssenpilj.cc"];
+/// 轮换记录：`lbvrhyir.cc`(11/05) → `kozhmami.cc`/`ssenpilj.cc`(11/17)
+/// → `aqkmowihz.cc`/`kplsifomz.cc`(11/24，旧域名的 API 已「停用」）。
+const SEED_DOMAINS: [&str; 2] = ["aqkmowihz.cc", "kplsifomz.cc"];
 /// 种子里的固定子域（大学代号，发布页给的原始清单）
 const SEED_SUBS: [&str; 8] = ["thu", "pku", "fdu", "sjtu", "zju", "nju", "xmu", "sysu"];
 /// 兜底时另外生成多少个随机子域
@@ -226,18 +227,17 @@ pub async fn probe(urls: Vec<String>) -> Value {
 /// 自动测速并切到最快线路：从中转页 + 固定线路 + 种子收集候选，全部探测后按延迟排序，
 /// 切换到第一条「真能跑业务」且最快的地址并落盘。返回切换结果快照。
 pub async fn auto_switch_fastest(current: &str) -> Value {
-    // 收集候选：固定线路 + 国内直连中转页 + 内置种子（去重、去掉当前）
+    // 收集候选：固定线路 + 发布页当前域名 + 内置种子 + 中转页（去重、去掉当前）
     let mut urls: Vec<String> = FIXED.iter().map(|(_, u)| u.to_string()).collect();
-    if let Ok(v) = relay_mirrors().await {
-        if let Some(list) = v.get("items").and_then(|i| i.as_array()) {
-            for x in list {
-                if let Some(u) = x.get("url").and_then(|u| u.as_str()) {
-                    urls.push(u.to_string());
-                }
-            }
+    if let Ok(v) = mirrors().await {
+        if v.get("fallback").and_then(|b| b.as_bool()) != Some(true) {
+            urls.extend(urls_of(&v));
         }
     }
     urls.extend(seeds());
+    if let Ok(v) = relay_mirrors().await {
+        urls.extend(urls_of(&v));
+    }
 
     let mut seen = std::collections::HashSet::new();
     urls.retain(|u| u != current && seen.insert(u.clone()));
@@ -285,23 +285,20 @@ async fn probe_one(url: String) -> Value {
     }
 }
 
-/// 打一次边缘信封，判断该线路是否**真的在提供业务接口**。
+/// 打一次真实业务接口，判断该线路是否**真的在提供业务接口**。
 ///
 /// `Ok(())` 可用；`Err((Some(code), _))` HTTP 通但不是有效接口；`Err((None, _))` 连不上。
+///
+/// 上游已停用 `/api/edge/request` 信封，这里直接 GET 业务接口。
+/// 注意：域名活着但 API 被关掉时会返回 `{"status":0,"msg":"接口已停用"}`，
+/// 这种必须判为不可用，否则换线会停在死域名上。
 async fn api_ok(url: &str, timeout: Duration) -> Result<(), (Option<u16>, String)> {
     let origin = url.trim_end_matches('/');
-    let envelope = json!({
-        "method": "GET",
-        "path": PROBE_PATH,
-        "body": "",
-        "content_type": "",
-    });
     let resp = crate::net::client()
-        .post(format!("{origin}/api/edge/request"))
+        .get(format!("{origin}{PROBE_PATH}"))
         .timeout(timeout)
         .header("Accept", "application/json")
         .header("Referer", format!("{origin}/"))
-        .json(&envelope)
         .send()
         .await
         .map_err(|e| (None, crate::net::err_text(&e)))?;
@@ -315,10 +312,18 @@ async fn api_ok(url: &str, timeout: Duration) -> Result<(), (Option<u16>, String
         .text()
         .await
         .map_err(|e| (Some(code), crate::net::err_text(&e)))?;
-    // 有效响应一定是 {"status":1,"data":…}；空壳站 / 跳转页返回的是 HTML
+    // 有效响应一定是 {"status":1,"data":…}
     match serde_json::from_str::<Value>(&text) {
-        Ok(v) if v.get("status").is_some() || v.get("data").is_some() => Ok(()),
-        _ => Err((Some(code), "返回的不是接口信封".to_string())),
+        Ok(v) if v.get("status").and_then(|s| s.as_i64()) == Some(1) => Ok(()),
+        Ok(v) => Err((
+            Some(code),
+            v.get("msg")
+                .and_then(|m| m.as_str())
+                .filter(|s| !s.is_empty())
+                .unwrap_or("返回的不是有效接口")
+                .to_string(),
+        )),
+        Err(_) => Err((Some(code), "返回的不是接口信封".to_string())),
     }
 }
 
@@ -345,19 +350,15 @@ async fn auto_failover_inner(current: &str) -> Option<String> {
         return Some(hit);
     }
 
-    // 2) 国内直连中转页（hgai18.com）——大陆用户的第一优先，无需代理
-    if let Ok(v) = relay_mirrors().await {
-        if let Some(list) = v
-            .get("items")
-            .and_then(|i| i.as_array())
-            .map(|a| {
-                a.iter()
-                    .filter_map(|x| x.get("url").and_then(|u| u.as_str()))
-                    .map(|s| s.to_string())
-                    .filter(|u| u != current)
-                    .collect::<Vec<_>>()
-            })
-        {
+    // 2) 地址发布页：上游域名会定期轮换（aqkmowihz.cc / kplsifomz.cc …），
+    //    只有发布页能拿到**当前**域名，所以优先于写死的种子。
+    if let Ok(v) = mirrors().await {
+        if v.get("fallback").and_then(|b| b.as_bool()) != Some(true) {
+            let list = urls_of(&v)
+                .into_iter()
+                .filter(|u| u != current)
+                .take(AUTO_MIRROR_TRY)
+                .collect::<Vec<_>>();
             if let Some(hit) = first_ok(&list, AUTO_PROBE_TIMEOUT).await {
                 let _ = crate::net::set_base(&hit);
                 return Some(hit);
@@ -365,37 +366,36 @@ async fn auto_failover_inner(current: &str) -> Option<String> {
         }
     }
 
-    // 3) 内置种子（不需要任何外部页面，泛解析随机子域）
+    // 3) 内置种子（发布页打不开时的自举，写死的主域可能已过期）
     let seed: Vec<String> = seeds().into_iter().filter(|u| u != current).collect();
     if let Some(hit) = first_ok(&seed, AUTO_PROBE_TIMEOUT).await {
         let _ = crate::net::set_base(&hit);
         return Some(hit);
     }
 
-    // 4) 最后才去抓旧发布页（这一步本身也可能被墙，且要多花几秒）
-    let Ok(v) = mirrors().await else {
-        return None;
-    };
-    // 返回的是内置种子说明发布页没抓到，而种子在第 3 步已经试过了
-    if v.get("fallback").and_then(|b| b.as_bool()) == Some(true) {
-        return None;
+    // 4) 中转页（hgai18.com 改版后经常只剩一个跳转桩，放最后）
+    if let Ok(v) = relay_mirrors().await {
+        let list = urls_of(&v).into_iter().filter(|u| u != current).collect::<Vec<_>>();
+        if let Some(hit) = first_ok(&list, AUTO_PROBE_TIMEOUT).await {
+            let _ = crate::net::set_base(&hit);
+            return Some(hit);
+        }
     }
-    let list: Vec<String> = v
-        .get("items")
+
+    None
+}
+
+/// 从 mirrors()/relay_mirrors() 的返回值里取 `items[].url`。
+fn urls_of(v: &Value) -> Vec<String> {
+    v.get("items")
         .and_then(|i| i.as_array())
         .map(|a| {
             a.iter()
                 .filter_map(|x| x.get("url").and_then(|u| u.as_str()))
                 .map(|s| s.to_string())
-                .filter(|u| u != current)
-                .take(AUTO_MIRROR_TRY)
                 .collect()
         })
-        .unwrap_or_default();
-
-    let hit = first_ok(&list, AUTO_PROBE_TIMEOUT).await?;
-    let _ = crate::net::set_base(&hit);
-    Some(hit)
+        .unwrap_or_default()
 }
 
 /// 并发 6 条一组探测，返回第一条可用的（同组内按完成顺序）。

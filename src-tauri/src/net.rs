@@ -19,8 +19,6 @@
 //! 排查手段：环境变量 `HGHUB_PROXY=http://127.0.0.1:7897` 可强制指定代理，
 //! `net_diag` 命令会输出 DNS/HTTP/环境变量快照。
 
-use base64::engine::general_purpose::STANDARD as B64;
-use base64::Engine;
 use once_cell::sync::Lazy;
 use serde_json::{json, Value};
 use std::path::PathBuf;
@@ -158,6 +156,11 @@ pub fn is_connect_error(e: &str) -> bool {
 /// `/api/edge/request` 是 404、405 或 502。这种也算换线的理由。
 pub fn is_line_error(e: &str) -> bool {
     if is_connect_error(e) {
+        return true;
+    }
+    // 上游把这批域名下的 API 关掉时返回 `{"status":0,"msg":"接口已停用"}`，
+    // 这是「换个域名还能用」的强信号，必须触发换线。
+    if e.contains("接口已停用") || e.contains("接口停用") {
         return true;
     }
     ["HTTP 404", "HTTP 405", "HTTP 502", "HTTP 503", "HTTP 504"]
@@ -301,24 +304,45 @@ where
     Err(last)
 }
 
-/// 真正发一次信封请求（不重试）。
-async fn send_envelope(
+/// 发一次真实请求（不重试）。
+///
+/// 上游自 2026-11 起**停用了 `/api/edge/request` 加密信封**（旧入口返回
+/// `{"status":0,"msg":"接口已停用"}`），改为直连 REST：客户端按 `method + path`
+/// 直接访问 `{base}{path}`，响应仍是 `{"status":1,"data":…}` 的老格式。
+async fn send_request(
     client: &reqwest::Client,
+    method: &str,
     url: &str,
     referer: &str,
-    envelope: &Value,
+    body: Option<&Value>,
     token: Option<&str>,
 ) -> Result<Value, String> {
+    let m = reqwest::Method::from_bytes(method.as_bytes())
+        .map_err(|e| format!("非法 method {method}: {e}"))?;
     let mut req = client
-        .post(url)
+        .request(m.clone(), url)
         .header("Accept", "application/json")
-        .header("Referer", referer)
-        .json(envelope);
+        .header("Referer", referer);
+
+    // POST / PUT / DELETE 上游要求 body 至少是 `{}`，空 body 会报「播放参数无效」
+    match body {
+        Some(v) => {
+            req = req
+                .header("Content-Type", "application/json")
+                .body(serde_json::to_vec(v).map_err(|e| e.to_string())?);
+        }
+        None if m != reqwest::Method::GET && m != reqwest::Method::HEAD => {
+            req = req.header("Content-Type", "application/json").body("{}");
+        }
+        None => {}
+    }
+
     if let Some(t) = token {
         if !t.is_empty() {
             req = req.header("Authorization", format!("Bearer {t}"));
         }
     }
+
     let resp = req.send().await.map_err(|e| err_text(&e))?;
     let status = resp.status();
     let text = resp.text().await.map_err(|e| err_text(&e))?;
@@ -335,76 +359,71 @@ async fn send_envelope(
 }
 
 /// 单发一次（不重试）：用来**快速**判断这条线路是不是根本不通。
-async fn post_envelope_once(
+async fn request_once(
     cur: &str,
-    envelope: &Value,
+    method: &str,
+    path: &str,
+    body: Option<&Value>,
     token: Option<&str>,
 ) -> Result<Value, String> {
-    let client = client();
-    let url = format!("{cur}/api/edge/request");
+    let url = format!("{}{}", cur.trim_end_matches('/'), path);
     let referer = format!("{cur}/");
-    send_envelope(client.as_ref(), &url, &referer, envelope, token).await
+    let client = client();
+    send_request(client.as_ref(), method, &url, &referer, body, token).await
 }
 
-/// 往指定基址发信封请求（含 3 次重试与客户端自愈）。
-async fn post_envelope(cur: &str, envelope: &Value, token: Option<&str>) -> Result<Value, String> {
-    let url = format!("{cur}/api/edge/request");
+/// 往指定基址发请求（含 3 次重试与客户端自愈）。
+async fn request_with_retry(
+    cur: &str,
+    method: &str,
+    path: &str,
+    body: Option<Value>,
+    token: Option<&str>,
+) -> Result<Value, String> {
+    let url = format!("{}{}", cur.trim_end_matches('/'), path);
     let referer = format!("{cur}/");
-    let envelope = envelope.clone();
+    let method = method.to_string();
     let token = token.map(|s| s.to_string());
 
     with_retry(move |client: reqwest::Client| {
-        let envelope = envelope.clone();
-        let token = token.clone();
         let url = url.clone();
         let referer = referer.clone();
+        let method = method.clone();
+        let body = body.clone();
+        let token = token.clone();
         async move {
-            send_envelope(&client, &url, &referer, &envelope, token.as_deref()).await
+            send_request(&client, &method, &url, &referer, body.as_ref(), token.as_deref()).await
         }
     })
     .await
 }
 
-/// 业务请求：走边缘信封。
+/// 业务请求：直连 REST（原边缘信封已被上游停用）。
 ///
-/// 线路不通时**自动换线再试一次**（固定线路 → 发布页镜像）。换好的地址会落盘，
-/// 所以这是一次性代价：iPhone 上 `huangguoai.com` 被 DNS 污染导致「没有网络」时，
-/// 首次请求会自动落到可用镜像上，而不是永远报错。
+/// 线路不通时**自动换线再试一次**（固定线路 → 发布页 → 种子）。换好的地址会落盘，
+/// 所以这是一次性代价：`huangguoai.com` 被 DNS 污染或域名轮换后，首次请求会自动
+/// 落到可用线路，而不是永远报错。
 ///
-/// 先用**单发**探一次：线路真挂了要立刻换，而不是在死域名上耗完 3 次重试（30 秒）。
+/// 先用**单发**探一次：线路真挂了要立刻换，而不是在死域名上耗完 3 次重试。
 pub async fn edge(
     method: &str,
     path: &str,
     body: Option<Value>,
     token: Option<&str>,
 ) -> Result<Value, String> {
-    let (encoded, ctype) = match &body {
-        Some(v) => (
-            B64.encode(serde_json::to_vec(v).map_err(|e| e.to_string())?),
-            "application/json",
-        ),
-        None => (String::new(), ""),
-    };
-    let envelope = json!({
-        "method": method,
-        "path": path,
-        "body": encoded,
-        "content_type": ctype,
-    });
-
     let cur = base();
-    let value = match post_envelope_once(&cur, &envelope, token).await {
+    let value = match request_once(&cur, method, path, body.as_ref(), token).await {
         Ok(v) => v,
         Err(e) if is_line_error(&e) => match failover_once(&cur).await {
             Some(next) => {
                 eprintln!("[net] 线路 {cur} 不可用（{e}），已自动切到 {next}");
-                post_envelope(&next, &envelope, token).await?
+                request_with_retry(&next, method, path, body, token).await?
             }
             // 没有别的线路可换：可能是瞬时抖动，回到本线路走完整重试
-            None => post_envelope(&cur, &envelope, token).await?,
+            None => request_with_retry(&cur, method, path, body, token).await?,
         },
         // 非线路问题（比如 5xx 抖动）：本线路重试即可
-        Err(_) => post_envelope(&cur, &envelope, token).await?,
+        Err(_) => request_with_retry(&cur, method, path, body, token).await?,
     };
 
     if value.is_null() {
@@ -464,6 +483,57 @@ mod tests {
             "{}",
             serde_json::to_string_pretty(&diagnose().await).expect("json")
         );
+    }
+
+    /// 端到端验证直连 REST 改造（要联网，故 ignore）：
+    /// `cargo test --lib net::tests::rest_chain_live -- --ignored --nocapture`
+    ///
+    /// 依次验证：列表 → 详情 → 新播放接口(streans.main) → m3u8 → 首个分片。
+    #[tokio::test]
+    #[ignore]
+    async fn rest_chain_live() {
+        for base in ["https://thu.aqkmowihz.cc", "https://pku.kplsifomz.cc"] {
+            let _ = set_base(base);
+            println!("\n=== 线路 {base} ===");
+            match edge("GET", "/api/videos?page=1&size=1", None, None).await {
+                Ok(v) => println!(
+                    "列表 ok，首条 id={:?}",
+                    v.get("items")
+                        .and_then(|i| i.as_array())
+                        .and_then(|a| a.first())
+                        .and_then(|x| x.get("id"))
+                ),
+                Err(e) => {
+                    println!("列表失败: {e}");
+                    continue;
+                }
+            }
+            // 新播放接口
+            let play = edge("POST", "/api/videos/117/episodes/3/playback", None, None).await;
+            let url = match play {
+                Ok(v) => v
+                    .get("streams")
+                    .and_then(|s| s.get("main"))
+                    .and_then(|x| x.as_str())
+                    .unwrap_or("")
+                    .to_string(),
+                Err(e) => {
+                    println!("playback 失败: {e}");
+                    continue;
+                }
+            };
+            println!("m3u8: {}", &url[..url.len().min(90)]);
+            assert!(!url.is_empty(), "streams.main 不能为空");
+            let (_, bytes) = fetch_bytes(&url).await.expect("m3u8");
+            let text = String::from_utf8_lossy(&bytes);
+            println!("m3u8 长度={} 是播放列表={}", text.len(), text.starts_with("#EXTM3U"));
+            let seg = text.lines().find(|l| !l.starts_with('#') && !l.trim().is_empty());
+            if let Some(seg) = seg {
+                let (_, b) = fetch_bytes(seg.trim()).await.expect("分片");
+                println!("首个分片 {} 字节", b.len());
+                assert!(b.len() > 1000);
+            }
+        }
     }
 
     /// 手动跑（要联网，故 ignore）：
