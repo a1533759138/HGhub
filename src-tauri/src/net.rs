@@ -1,7 +1,6 @@
 //! 网络层：与上游站点对话。
 //!
-//! 站点把全部 `/api/**` 调用收敛成 `POST /api/edge/request` 的信封，
-//! 我们只实现这一个入口，其余接口都是「填 path」。
+//! 业务接口直接使用 REST；保留历史入口名 `edge`，统一处理响应、重试与换线。
 //!
 //! # 代理（用户反馈「浏览器能开、HGhub 打不开」的根因就在这里）
 //!
@@ -150,17 +149,21 @@ pub fn is_connect_error(e: &str) -> bool {
         || e.contains("reset")
 }
 
+fn is_api_disabled(e: &str) -> bool {
+    e.contains("接口已停用") || e.contains("接口停用")
+}
+
 /// 这条线路「不可用」：连不上，或者根本没在提供接口。
 ///
 /// 后一种很常见：镜像域名过期后变成跳转页 / 空壳站，根路径 200 但
-/// `/api/edge/request` 是 404、405 或 502。这种也算换线的理由。
+/// 业务接口是 404、405 或 502。这种也算换线的理由。
 pub fn is_line_error(e: &str) -> bool {
     if is_connect_error(e) {
         return true;
     }
     // 上游把这批域名下的 API 关掉时返回 `{"status":0,"msg":"接口已停用"}`，
     // 这是「换个域名还能用」的强信号，必须触发换线。
-    if e.contains("接口已停用") || e.contains("接口停用") {
+    if is_api_disabled(e) {
         return true;
     }
     ["HTTP 404", "HTTP 405", "HTTP 502", "HTTP 503", "HTTP 504"]
@@ -346,16 +349,32 @@ async fn send_request(
     let resp = req.send().await.map_err(|e| err_text(&e))?;
     let status = resp.status();
     let text = resp.text().await.map_err(|e| err_text(&e))?;
+    parse_response(status, &text)
+}
+
+/// HTTP 200 也可能是线路停用；必须在进入换线判断前识别。
+fn parse_response(status: reqwest::StatusCode, text: &str) -> Result<Value, String> {
+    // 错误页可能含中文或 emoji，不能按字节下标截断 UTF-8。
+    let preview = || text.chars().take(160).collect::<String>();
     if status.as_u16() == 401 || status.as_u16() == 403 {
         return Err("401".to_string());
     }
     if !status.is_success() {
-        return Err(format!("HTTP {status}: {}", &text[..text.len().min(160)]));
+        return Err(format!("HTTP {status}: {}", preview()));
     }
     if text.trim().is_empty() {
         return Ok(Value::Null);
     }
-    serde_json::from_str::<Value>(&text).map_err(|e| format!("{e}: {}", &text[..text.len().min(160)]))
+    let value: Value = serde_json::from_str(text).map_err(|e| format!("{e}: {}", preview()))?;
+    if value.get("status").and_then(|v| v.as_i64()) != Some(1) {
+        if let Some(msg) = value.get("msg").and_then(|v| v.as_str()) {
+            if is_api_disabled(msg) {
+                return Err(msg.to_string());
+            }
+        }
+    }
+    // 登录失败、参数校验等普通业务错误仍交给调用方，避免额外重发这些请求。
+    Ok(value)
 }
 
 /// 单发一次（不重试）：用来**快速**判断这条线路是不是根本不通。
@@ -475,9 +494,58 @@ pub async fn fetch_bytes(url: &str) -> Result<(Option<String>, Vec<u8>), String>
 mod tests {
     use super::*;
 
-    /// 手动跑：`cargo test --lib net::tests::diag -- --nocapture`
+    #[test]
+    fn parses_success_and_empty_responses() {
+        let value = json!({ "status": 1, "data": { "items": [] } });
+        assert_eq!(
+            parse_response(reqwest::StatusCode::OK, &value.to_string()).unwrap(),
+            value
+        );
+        assert!(parse_response(reqwest::StatusCode::NO_CONTENT, "  ")
+            .unwrap()
+            .is_null());
+    }
+
+    #[test]
+    fn unicode_error_previews_do_not_panic() {
+        let body = "错误😀".repeat(100);
+        let preview = body.chars().take(160).collect::<String>();
+        for status in [reqwest::StatusCode::BAD_GATEWAY, reqwest::StatusCode::OK] {
+            let error = parse_response(status, &body).unwrap_err();
+            assert!(error.ends_with(&preview));
+            assert!(!error.contains(&body));
+        }
+    }
+
+    #[test]
+    fn disabled_business_response_is_a_line_error() {
+        for msg in ["接口已停用", "本线路接口停用，请切换线路"] {
+            let body = json!({ "status": 0, "msg": msg }).to_string();
+            let error = parse_response(reqwest::StatusCode::OK, &body).unwrap_err();
+            assert_eq!(error, msg);
+            assert!(is_line_error(&error));
+        }
+    }
+
+    #[test]
+    fn ordinary_business_errors_do_not_trigger_transport_retries() {
+        for msg in ["用户名或密码错误", "用户名 reset 不存在"] {
+            let value = json!({ "status": 0, "msg": msg });
+            assert_eq!(
+                parse_response(reqwest::StatusCode::OK, &value.to_string()).unwrap(),
+                value
+            );
+        }
+        assert_eq!(
+            parse_response(reqwest::StatusCode::UNAUTHORIZED, "").unwrap_err(),
+            "401"
+        );
+    }
+
+    /// 手动跑：`cargo test --lib net::tests::diag -- --ignored --nocapture`
     /// 关掉 TUN、只留系统代理时跑一遍，能直接看出客户端有没有走代理。
     #[tokio::test]
+    #[ignore = "requires external network and local proxy configuration"]
     async fn diag() {
         println!(
             "{}",

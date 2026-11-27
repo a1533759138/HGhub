@@ -4,6 +4,7 @@ import type { VideoCard } from "../types";
 import { useStore } from "../store";
 import { Masonry, RowCard } from "../components/cards";
 import { Empty } from "../components/ui";
+import { CHANNEL_SORTS, useChannelVideos, type ChannelSort } from "../hooks/useChannelVideos";
 import { IBack, IBookmark, IChevR, IGrid, ITrophy } from "../icons";
 
 export const CHANNELS = [
@@ -108,64 +109,19 @@ export default function Category({ wide }: { wide: boolean }) {
 /* ================= 频道详情页 ================= */
 export function ChannelPage({ cate, name, onBack, wide }: { cate: string; name: string; onBack: () => void; wide: boolean }) {
   const { push } = useStore();
-  const [sort, setSort] = useState<"最近更新" | "当前热播" | "精选推荐">("最近更新");
+  const [sort, setSort] = useState<ChannelSort>("latest");
   const [tag, setTag] = useState<string | null>(null);
-  const [items, setItems] = useState<VideoCard[]>([]);
-  const [page, setPage] = useState(0);
-  const [pages, setPages] = useState(1);
-  const [loading, setLoading] = useState(false);
-  const [err, setErr] = useState<string | null>(null);
-  const busy = useRef(false);
+  const { items, page, pages, loading, error: err, loadMore, refresh, hasMore } = useChannelVideos(cate, sort);
   const sentinel = useRef<HTMLDivElement>(null);
+  const filtered = tag ? items.filter((v) => (v.tags || []).includes(tag)) : items;
 
-  const loadMore = async () => {
-    if (busy.current || page >= pages) return;
-    busy.current = true;
-    setLoading(true);
-    try {
-      const next = page + 1;
-      const res = await api.category(cate, next, 20);
-      setItems((prev) => {
-        const seen = new Set(prev.map((x) => x.id));
-        return [...prev, ...(res?.items || []).filter((x) => !seen.has(x.id))];
-      });
-      setPage(next);
-      setPages(res?.pagination?.pages || next);
-      setErr(null);
-    } catch (e) {
-      setErr((e as Error).message || "加载失败");
-    } finally {
-      busy.current = false;
-      setLoading(false);
-    }
-  };
-
-  useEffect(() => { loadMore(); /* eslint-disable-next-line */ }, []);
   useEffect(() => {
     const el = sentinel.current;
-    if (!el) return;
-    const io = new IntersectionObserver((es) => { if (es[0].isIntersecting) loadMore(); }, { rootMargin: "600px" });
+    if (!el || loading || err || !filtered.length || !hasMore) return;
+    const io = new IntersectionObserver((es) => { if (es[0].isIntersecting) loadMore(); }, { rootMargin: "300px" });
     io.observe(el);
     return () => io.disconnect();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [page, pages]);
-
-  const sorted = [...items].sort((a, b) => {
-    if (sort === "当前热播") return (b.hot || 0) - (a.hot || 0);
-    if (sort === "精选推荐") return (b.score || 0) - (a.score || 0);
-    // 最近更新：优先 last_ep_at / new_at，两者都为 0 时退回 created_at
-    const at = (x: VideoCard) => {
-      const ep = x.last_ep_at || 0;
-      if (ep > 0) return ep;
-      const nw = x.new_at || 0;
-      if (nw > 0) return nw;
-      return x.created_at ? new Date(x.created_at.replace(" ", "T")).getTime() : 0;
-    };
-    return at(b) - at(a);
-  });
-
-  // 标签筛选：本地按 tags 字段过滤
-  const filtered = tag ? sorted.filter((v) => (v.tags || []).some((t) => t === tag)) : sorted;
+  }, [loading, err, filtered.length, hasMore, loadMore]);
 
   return (
     <div className="absolute inset-0 bg-bg flex flex-col">
@@ -179,10 +135,10 @@ export function ChannelPage({ cate, name, onBack, wide }: { cate: string; name: 
           </div>
         </div>
         <div className="px-4 pb-3 flex gap-2">
-          {(["最近更新", "当前热播", "精选推荐"] as const).map((s) => (
-            <button key={s} onClick={() => setSort(s)}
-              className={`px-4 h-8 rounded-(--r-ctl) text-[12px] font-semibold pressable ${sort === s ? "tonal text-on-sec" : "bg-s3 text-mut"}`}
-              style={sort === s ? { background: "var(--p-sec)", color: "var(--p-primary)" } : undefined}>{s}</button>
+          {CHANNEL_SORTS.map((s) => (
+            <button key={s.key} onClick={() => setSort(s.key)}
+              className={`px-4 h-8 rounded-(--r-ctl) text-[12px] font-semibold pressable ${sort === s.key ? "tonal text-on-sec" : "bg-s3 text-mut"}`}
+              style={sort === s.key ? { background: "var(--p-sec)", color: "var(--p-primary)" } : undefined}>{s.label}</button>
           ))}
         </div>
         {/* 热门题材标签筛选 */}
@@ -202,11 +158,17 @@ export function ChannelPage({ cate, name, onBack, wide }: { cate: string; name: 
           <Masonry videos={filtered} wide={wide} onOpen={(v) => push({ kind: "feed", videoIds: filtered.map((x) => x.id), index: filtered.findIndex((x) => x.id === v.id), title: name })} />
         ) : err ? (
           <Empty icon={<IGrid size={26} />} title="加载失败" sub={err} action="重试" onAction={loadMore} />
-        ) : (
+        ) : loading ? (
           <div className="flex justify-center py-10"><div className="w-8 h-8 spinner" /></div>
+        ) : (
+          <Empty icon={<IGrid size={26} />} title={tag ? "当前已加载内容暂无匹配" : "暂无内容"}
+            sub="换个题材，或继续加载看看" action={hasMore ? "继续加载" : "刷新"} onAction={hasMore ? loadMore : refresh} />
         )}
         <div ref={sentinel} className="h-10" />
         {loading && <div className="flex justify-center py-3"><div className="w-6 h-6 spinner" /></div>}
+        {!loading && filtered.length > 0 && (hasMore || err) && (
+          <div className="text-center py-3"><button onClick={loadMore} className="px-5 h-9 rounded-(--r-ctl) bg-s3 text-[12px] text-on pressable">{err ? "加载失败，点击重试" : "加载更多"}</button></div>
+        )}
         {!loading && page >= pages && filtered.length > 0 && (
           <div className="text-center text-[10.5px] text-dim py-3">— 已经到底啦 —</div>
         )}

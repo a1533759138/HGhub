@@ -29,17 +29,13 @@ const TAB_H = { android: 48, ios: 74 } as const;
 
 function TabBar() {
   const { tab, setTab, theme } = useStore();
-  /* 细瘦纯文字分栏：只有选中项高亮，没有指示点。
-     首页是沉浸视频 → 底栏压深色；搜索/分类/我的 是浅色内容页 →
-     浅色主题下底栏跟着换成浅色，深色主题保持深色。 */
-  const overVideo = tab === "home";
-  const lightBar = !overVideo && theme === "light";
+  const lightBar = theme === "light";
   return (
     <nav className="hg-tabbar absolute bottom-0 inset-x-0 z-30"
       style={{
         paddingBottom: "var(--sab, 0px)",
-        background: lightBar ? "rgba(250, 250, 250, .97)" : overVideo ? "#000000" : "#141414",
-        borderTop: lightBar ? "1px solid rgba(0,0,0,.08)" : overVideo ? "none" : "1px solid rgba(255,255,255,.07)",
+        background: lightBar ? "rgba(250, 250, 250, .97)" : "#141414",
+        borderTop: lightBar ? "1px solid rgba(0,0,0,.08)" : "1px solid rgba(255,255,255,.07)",
         boxShadow: lightBar ? "0 -2px 14px rgba(0,0,0,.05)" : "none",
       }}>
       <div className="h-[40px] flex items-center px-1">

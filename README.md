@@ -61,7 +61,7 @@ Windows / macOS / Android / iOS 四端 · Fluent 设计 · 沉浸式竖屏播放
 │  └─ pages/                 Home / Search / Category / Profile / Posts
 ├─ src-tauri/                Rust 后端
 │  └─ src/
-│     ├─ net.rs              请求层（边缘信封 + 重试）
+│     ├─ net.rs              请求层（REST + 重试）
 │     ├─ api.rs              业务命令
 │     ├─ media.rs            封面解密 + HLS 代理 + 缓存
 │     └─ session.rs          token 持久化
@@ -106,16 +106,28 @@ pnpm ios:build        # 有开发者证书时直接出签名 IPA
 
 ## 实现要点
 
-1. **统一边缘信封**：站点把 `/api/**` 收敛为 `POST /api/edge/request`（`method/path/body(base64)/content_type` + `Authorization: Bearer`），本项目只对接这一个入口，无需处理 Cookie。
+1. **统一 REST 请求**：直接调用 `{base}/api/**`，登录会话使用 `Authorization: Bearer`。旧边缘信封入口已停用，线路返回业务停用状态也会触发自动换线。
 2. **封面解密**：封面为 AES-128-CBC 密文，Rust 侧解密后经自定义协议输出，前端 `<img>` 直接使用。
 3. **HLS 代理**：m3u8 与分片经自定义协议转发并改写 `#EXT-X-KEY` / 分片地址，绕开 WebView 的 CORS 与防盗链。
 4. **自定义协议**：Windows / Android 为 `http://hg.localhost/*`，macOS / iOS（WKWebView）为 `hg://localhost/*`。
    Rust 侧 `media.rs` 的 `LOCAL_ORIGIN` 与前端 `api.ts` 的 `LOCAL` 按平台取值，必须一致，否则封面与视频全部加载失败。
 5. **线路自动切换**：上游域名经常被污染 / 失效，`net::edge` 在请求失败时自动换线再试一次。
-   候选顺序为固定线路 → 内置种子（泛解析随机子域，不依赖任何外部页面）→ 地址发布页镜像；
+   候选顺序为固定线路 → 地址发布页镜像 → 内置种子 → 中转页；各阶段有独立预算，发布页超时不会阻塞种子兜底。
    换好的地址写入应用数据目录的 `line.json`，下次启动直接沿用，也可在设置里手动指定。
 6. **不做签名逆向**：只复用浏览器同源行为，接口字段均有文档与实测样本。
 
+
+## 本地验证
+
+```bash
+pnpm build                         # 类型检查与生产构建
+node scripts/test-channels.cjs      # 分类排序、分页、刷新和竞态的离线回归
+cargo test --manifest-path src-tauri/Cargo.toml --lib
+```
+
+默认 Rust 测试不请求上游；依赖实时线路或时效媒体地址的烟雾测试需要显式使用 `--ignored`。
+首页的精选推荐使用服务端 `sort=random`，当前热播使用 `sort=hot_window`；
+排行榜使用服务端热播、推荐、飙升三种榜单，专题按需分页，不在启动时抓取全量数据。
 
 ## 免责声明
 

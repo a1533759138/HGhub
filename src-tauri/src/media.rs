@@ -387,6 +387,7 @@ mod tests {
     use super::*;
 
     #[tokio::test]
+    #[ignore = "requires live upstream media and time-limited URLs"]
     async fn live_play_chain() {
         use crate::net::edge;
         let play = edge("GET", "/api/videos/117/play?ep=3&page_texts=0", None, None).await
@@ -414,6 +415,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore = "requires live upstream media and time-limited URLs"]
     async fn segment_cache_and_prefetch() {
         use crate::net::edge;
         use std::time::{Duration, Instant};
@@ -449,6 +451,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore = "requires live upstream media and time-limited URLs"]
     async fn playlist_rewrite_works() {
         let m3u8 = "https://yd-lphu-hls.hzjvlo.cn/videos5/247f3c9862e8e1537ade0b20c45ac962/247f3c9862e8e1537ade0b20c45ac962.m3u8?auth_key=1793700503-0-0-b9575bb11258cf40cd5499c052fc5820&v=3&time=0&via=hgdj&via_bm=dx";
         let q = format!("u={}", enc(m3u8));
@@ -461,6 +464,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore = "requires live upstream media and time-limited URLs"]
     async fn cover_decrypt_works() {
         let url = "https://pic.drleao.cn/upload_01/upload/20261029/2026102918545028336.jpg?auth_key=1793707703-0-0-1cbd9389b0b69141dd741f16bb71397a";
         match load_image(url).await {

@@ -5,6 +5,9 @@ use crate::session::SessionStore;
 use serde_json::{json, Value};
 use tauri::State;
 
+const PATH_SEGMENT: &percent_encoding::AsciiSet = &percent_encoding::NON_ALPHANUMERIC
+    .remove(b'-').remove(b'_').remove(b'.').remove(b'~');
+
 pub struct Api {
     pub session: SessionStore,
 }
@@ -173,47 +176,15 @@ pub async fn check_update() -> Result<Value, String> {
     }))
 }
 
-/// 用系统默认浏览器打开链接（只允许 http/https）。
+/// 使用系统浏览器打开链接，移动端通过 Tauri 的原生 opener 插件处理。
 #[tauri::command]
-pub async fn open_url(url: String) -> Result<(), String> {
-    if !(url.starts_with("https://") || url.starts_with("http://")) {
+pub async fn open_url(app: tauri::AppHandle, url: String) -> Result<(), String> {
+    use tauri_plugin_opener::OpenerExt;
+    let parsed = url::Url::parse(&url).map_err(|_| "链接格式无效".to_string())?;
+    if !matches!(parsed.scheme(), "http" | "https") || parsed.host_str().is_none() {
         return Err("只允许打开 http(s) 链接".to_string());
     }
-    open_external(&url)
-}
-
-#[cfg(target_os = "windows")]
-fn open_external(url: &str) -> Result<(), String> {
-    use std::os::windows::process::CommandExt;
-    std::process::Command::new("cmd")
-        .args(["/C", "start", "", url])
-        .creation_flags(0x0800_0000) // CREATE_NO_WINDOW，别闪一下黑框
-        .spawn()
-        .map(|_| ())
-        .map_err(|e| e.to_string())
-}
-
-#[cfg(target_os = "macos")]
-fn open_external(url: &str) -> Result<(), String> {
-    std::process::Command::new("open")
-        .arg(url)
-        .spawn()
-        .map(|_| ())
-        .map_err(|e| e.to_string())
-}
-
-#[cfg(all(unix, not(any(target_os = "macos", target_os = "android"))))]
-fn open_external(url: &str) -> Result<(), String> {
-    std::process::Command::new("xdg-open")
-        .arg(url)
-        .spawn()
-        .map(|_| ())
-        .map_err(|e| e.to_string())
-}
-
-#[cfg(target_os = "android")]
-fn open_external(_url: &str) -> Result<(), String> {
-    Err("移动端请手动在浏览器打开".to_string())
+    app.opener().open_url(parsed.as_str(), None::<&str>).map_err(|e| e.to_string())
 }
 
 /* ───────────────────────── 会话 ───────────────────────── */
@@ -302,18 +273,32 @@ pub async fn api_feed(state: State<'_, Api>, page: u32, size: u32) -> Result<Val
         .await
 }
 
+fn category_path(cate: &str, page: u32, size: u32, sort: &str) -> Result<String, String> {
+    let cate = percent_encoding::utf8_percent_encode(cate, PATH_SEGMENT);
+    let mut path = format!("/api/videos/category/{cate}?page={}&size={}", page.max(1), size.clamp(1, 50));
+    match sort {
+        "latest" | "" => {}
+        "hot_window" | "random" => path.push_str(&format!("&sort={sort}")),
+        _ => return Err("不支持的排序方式".to_string()),
+    }
+    if sort == "random" {
+        let nonce = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis()).unwrap_or(0);
+        path.push_str(&format!("&_={nonce}"));
+    }
+    Ok(path)
+}
+
 #[tauri::command]
 pub async fn api_category(
     state: State<'_, Api>,
     cate: String,
     page: u32,
     size: u32,
+    sort: Option<String>,
 ) -> Result<Value, String> {
-    state
-        .get(&format!(
-            "/api/videos/category/{cate}?page={page}&size={size}"
-        ))
-        .await
+    let path = category_path(&cate, page, size, sort.as_deref().unwrap_or("latest"))?;
+    state.get(&path).await
 }
 
 #[tauri::command]
@@ -360,8 +345,11 @@ pub async fn api_topics(state: State<'_, Api>, page: u32, size: u32) -> Result<V
 
 /// 专题详情：`GET /api/topics/{slug}` → `{topic:{...}, videos:{items:[...], pagination}, related:[...]}`
 #[tauri::command]
-pub async fn api_topic(state: State<'_, Api>, slug: String) -> Result<Value, String> {
-    state.get(&format!("/api/topics/{slug}")).await
+pub async fn api_topic(
+    state: State<'_, Api>, slug: String, page: Option<u32>, size: Option<u32>,
+) -> Result<Value, String> {
+    let slug = percent_encoding::utf8_percent_encode(&slug, PATH_SEGMENT);
+    state.get(&format!("/api/topics/{slug}?page={}&size={}", page.unwrap_or(1).max(1), size.unwrap_or(20).clamp(1, 50))).await
 }
 
 /* ───────────────────────── 详情 / 播放 ───────────────────────── */
@@ -524,7 +512,15 @@ pub async fn api_post_comments(
 }
 #[cfg(test)]
 mod tests {
-    use super::is_newer;
+    use super::{is_newer, category_path};
+
+    #[test]
+    fn channel_sort_paths_match_site() {
+        assert_eq!(category_path("ai-duanju", 0, 20, "latest").unwrap(), "/api/videos/category/ai-duanju?page=1&size=20");
+        assert!(category_path("ai-duanju", 2, 20, "hot_window").unwrap().ends_with("page=2&size=20&sort=hot_window"));
+        assert!(category_path("ai-duanju", 1, 20, "random").unwrap().contains("&sort=random&_="));
+        assert!(category_path("ai-duanju", 1, 20, "score").is_err());
+    }
 
     #[test]
     fn compares_versions() {

@@ -35,6 +35,22 @@ const AUTO_MIRROR_TRY: usize = 18;
 /// 自动换线的总预算：超了就放弃，宁可报错也不无限卡首屏
 const AUTO_BUDGET: Duration = Duration::from_secs(22);
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FailoverStage {
+    Fixed,
+    Mirrors,
+    Seeds,
+    Relay,
+}
+
+// 发布页发现与探测共用本阶段预算，不能耗尽种子和中转的兜底时间。
+const AUTO_STAGES: [(FailoverStage, Duration); 4] = [
+    (FailoverStage::Fixed, Duration::from_secs(4)),
+    (FailoverStage::Mirrors, Duration::from_secs(6)),
+    (FailoverStage::Seeds, Duration::from_secs(8)),
+    (FailoverStage::Relay, Duration::from_secs(4)),
+];
+
 /// 判断「这条线路真能跑业务」用的接口：最便宜且不需要登录。
 const PROBE_PATH: &str = "/api/videos?page=1&size=1";
 
@@ -110,11 +126,14 @@ pub async fn relay_mirrors() -> Result<Value, String> {
 /// 内置种子线路：随机子域优先（最不容易被封），再排固定子域。
 pub fn seeds() -> Vec<String> {
     let mut out = Vec::new();
-    for d in SEED_DOMAINS {
-        for _ in 0..SEED_RANDOM {
+    // 交错主域，让第一批探测即覆盖所有种子域，避免一个失效主域占满阶段预算。
+    for _ in 0..SEED_RANDOM {
+        for d in SEED_DOMAINS {
             out.push(format!("https://{}.{d}", rand_sub()));
         }
-        for s in SEED_SUBS {
+    }
+    for s in SEED_SUBS {
+        for d in SEED_DOMAINS {
             out.push(format!("https://{s}.{d}"));
         }
     }
@@ -339,50 +358,42 @@ pub async fn auto_failover(current: &str) -> Option<String> {
 }
 
 async fn auto_failover_inner(current: &str) -> Option<String> {
-    // 1) 写死的固定线路
-    let fixed: Vec<String> = FIXED
-        .iter()
-        .map(|(_, u)| u.to_string())
-        .filter(|u| u != current)
-        .collect();
-    if let Some(hit) = first_ok(&fixed, PROBE_TIMEOUT).await {
-        let _ = crate::net::set_base(&hit);
-        return Some(hit);
-    }
+    let hit = first_stage(&AUTO_STAGES, |stage| probe_stage(stage, current)).await?;
+    crate::net::set_base(&hit).ok()
+}
 
-    // 2) 地址发布页：上游域名会定期轮换（aqkmowihz.cc / kplsifomz.cc …），
-    //    只有发布页能拿到**当前**域名，所以优先于写死的种子。
-    if let Ok(v) = mirrors().await {
-        if v.get("fallback").and_then(|b| b.as_bool()) != Some(true) {
-            let list = urls_of(&v)
-                .into_iter()
-                .filter(|u| u != current)
-                .take(AUTO_MIRROR_TRY)
-                .collect::<Vec<_>>();
-            if let Some(hit) = first_ok(&list, AUTO_PROBE_TIMEOUT).await {
-                let _ = crate::net::set_base(&hit);
-                return Some(hit);
-            }
-        }
-    }
-
-    // 3) 内置种子（发布页打不开时的自举，写死的主域可能已过期）
-    let seed: Vec<String> = seeds().into_iter().filter(|u| u != current).collect();
-    if let Some(hit) = first_ok(&seed, AUTO_PROBE_TIMEOUT).await {
-        let _ = crate::net::set_base(&hit);
-        return Some(hit);
-    }
-
-    // 4) 中转页（hgai18.com 改版后经常只剩一个跳转桩，放最后）
-    if let Ok(v) = relay_mirrors().await {
-        let list = urls_of(&v).into_iter().filter(|u| u != current).collect::<Vec<_>>();
-        if let Some(hit) = first_ok(&list, AUTO_PROBE_TIMEOUT).await {
-            let _ = crate::net::set_base(&hit);
+async fn first_stage<F, Fut>(stages: &[(FailoverStage, Duration)], mut probe: F) -> Option<String>
+where
+    F: FnMut(FailoverStage) -> Fut,
+    Fut: std::future::Future<Output = Option<String>>,
+{
+    for &(stage, budget) in stages {
+        if let Ok(Some(hit)) = tokio::time::timeout(budget, probe(stage)).await {
             return Some(hit);
         }
     }
-
     None
+}
+
+async fn probe_stage(stage: FailoverStage, current: &str) -> Option<String> {
+    let mut urls: Vec<String> = match stage {
+        FailoverStage::Fixed => FIXED.iter().map(|(_, u)| u.to_string()).collect(),
+        FailoverStage::Mirrors => {
+            let v = mirrors().await.ok()?;
+            if v.get("fallback").and_then(|b| b.as_bool()) == Some(true) {
+                return None;
+            }
+            urls_of(&v)
+        }
+        FailoverStage::Seeds => seeds(),
+        FailoverStage::Relay => urls_of(&relay_mirrors().await.ok()?),
+    };
+    let mut seen = std::collections::HashSet::new();
+    urls.retain(|u| u != current && seen.insert(u.clone()));
+    if stage == FailoverStage::Mirrors {
+        urls.truncate(AUTO_MIRROR_TRY);
+    }
+    first_ok(&urls, AUTO_PROBE_TIMEOUT).await
 }
 
 /// 从 mirrors()/relay_mirrors() 的返回值里取 `items[].url`。
@@ -401,20 +412,30 @@ fn urls_of(v: &Value) -> Vec<String> {
 /// 并发 6 条一组探测，返回第一条可用的（同组内按完成顺序）。
 async fn first_ok(urls: &[String], timeout: Duration) -> Option<String> {
     for chunk in urls.chunks(6) {
-        let mut handles = Vec::new();
+        let mut probes = tokio::task::JoinSet::new();
         for u in chunk {
             let u = u.clone();
-            handles.push(tokio::spawn(async move {
+            probes.spawn(async move {
                 match api_ok(&u, timeout).await {
                     Ok(()) => Some(u),
                     Err(_) => None,
                 }
-            }));
+            });
         }
-        for h in handles {
-            if let Ok(Some(u)) = h.await {
-                return Some(u);
-            }
+        if let Some(hit) = first_success(probes).await {
+            return Some(hit);
+        }
+    }
+    None
+}
+
+async fn first_success(mut probes: tokio::task::JoinSet<Option<String>>) -> Option<String> {
+    while let Some(result) = probes.join_next().await {
+        if let Ok(Some(hit)) = result {
+            // 成功后中止并回收同批剩余任务；阶段超时时 JoinSet 的 Drop 也会中止它们。
+            probes.abort_all();
+            while probes.join_next().await.is_some() {}
+            return Some(hit);
         }
     }
     None
@@ -527,6 +548,102 @@ fn strip_line_comments(body: &str) -> String {
 mod tests {
     use super::*;
 
+    struct DropFlag(std::sync::Arc<std::sync::atomic::AtomicBool>);
+
+    impl Drop for DropFlag {
+        fn drop(&mut self) {
+            self.0.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+
+    #[test]
+    fn automatic_stages_reserve_seed_probe_time() {
+        let total: Duration = AUTO_STAGES.iter().map(|(_, budget)| *budget).sum();
+        assert!(total <= AUTO_BUDGET);
+        let seed_budget = AUTO_STAGES
+            .iter()
+            .find(|(stage, _)| *stage == FailoverStage::Seeds)
+            .map(|(_, budget)| *budget)
+            .unwrap();
+        assert!(seed_budget >= AUTO_PROBE_TIMEOUT);
+        let candidates = seeds();
+        for domain in SEED_DOMAINS {
+            assert!(candidates.iter().take(6).any(|url| url.ends_with(domain)));
+        }
+    }
+
+    #[tokio::test]
+    async fn stalled_publish_stage_yields_to_seeds() {
+        let dropped = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let stages = [
+            (FailoverStage::Fixed, Duration::from_millis(50)),
+            (FailoverStage::Mirrors, Duration::from_millis(10)),
+            (FailoverStage::Seeds, Duration::from_millis(50)),
+        ];
+        let hit = first_stage(&stages, |stage| {
+            let dropped = dropped.clone();
+            async move {
+                match stage {
+                    FailoverStage::Fixed => None,
+                    FailoverStage::Mirrors => {
+                        let _guard = DropFlag(dropped);
+                        std::future::pending().await
+                    }
+                    FailoverStage::Seeds => Some("seed".to_string()),
+                    FailoverStage::Relay => unreachable!(),
+                }
+            }
+        })
+        .await;
+        assert_eq!(hit.as_deref(), Some("seed"));
+        assert!(dropped.load(std::sync::atomic::Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn fastest_success_cancels_pending_probes() {
+        let dropped = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let flag = dropped.clone();
+        let (started, ready) = tokio::sync::oneshot::channel();
+        let mut probes = tokio::task::JoinSet::new();
+        probes.spawn(async move {
+            let _guard = DropFlag(flag);
+            let _ = started.send(());
+            std::future::pending().await
+        });
+        ready.await.unwrap();
+        probes.spawn(async { None });
+        probes.spawn(async { Some("fast".to_string()) });
+        let hit = tokio::time::timeout(Duration::from_secs(2), first_success(probes))
+            .await
+            .expect("a pending first probe must not block a later success");
+        assert_eq!(hit.as_deref(), Some("fast"));
+        assert!(dropped.load(std::sync::atomic::Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn stage_timeout_cancels_pending_probes() {
+        let dropped = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let flag = dropped.clone();
+        let (started, ready) = tokio::sync::oneshot::channel();
+        let mut probes = tokio::task::JoinSet::new();
+        probes.spawn(async move {
+            let _guard = DropFlag(flag);
+            let _ = started.send(());
+            std::future::pending().await
+        });
+        ready.await.unwrap();
+        assert!(tokio::time::timeout(Duration::from_millis(10), first_success(probes))
+            .await
+            .is_err());
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while !dropped.load(std::sync::atomic::Ordering::SeqCst) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("timed-out stages must not leave their probes running");
+    }
+
     const SAMPLE: &str = r#"
 var subdomains = [
     'thu',  // 清华
@@ -573,8 +690,9 @@ var foreverUrls = [
         assert_eq!(script_src(html).as_deref(), Some("publish.js?20261103-2"));
     }
 
-    /// 手动跑：`cargo test --lib lines::tests::mirrors_live -- --nocapture`
+    /// 手动跑：`cargo test --lib lines::tests::mirrors_live -- --ignored --nocapture`
     #[tokio::test]
+    #[ignore = "requires the external publish pages"]
     async fn mirrors_live() {
         match mirrors().await {
             Ok(v) => println!("{}", serde_json::to_string_pretty(&v).expect("json")),
@@ -582,8 +700,9 @@ var foreverUrls = [
         }
     }
 
-    /// 手动跑：`cargo test --lib lines::tests::probe_live -- --nocapture`
+    /// 手动跑：`cargo test --lib lines::tests::probe_live -- --ignored --nocapture`
     #[tokio::test]
+    #[ignore = "requires external upstream servers"]
     async fn probe_live() {
         let urls = vec![
             "https://huangguoai.com".to_string(),

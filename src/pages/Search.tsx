@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
-import { api, fmt } from "../api";
-import type { VideoCard } from "../types";
+import { api } from "../api";
+import type { RankItem, VideoCard } from "../types";
 import { useStore } from "../store";
 import { Masonry, RankRow } from "../components/cards";
 import { Empty } from "../components/ui";
@@ -141,78 +141,38 @@ export default function Search({ active, wide }: { active: boolean; wide: boolea
   );
 }
 
-/* ================= 排行榜（客户端自算，保证高分/最热/最新都准确） ================= */
+/* ================= 排行榜（沿用上游榜单顺序与指标） ================= */
 const RANK_TABS = [
-  { k: "hot", label: "最热榜", desc: "按播放热度排序" },
-  { k: "score", label: "高分榜", desc: "按评分高低排序" },
-  { k: "new", label: "最新榜", desc: "按更新时间排序" },
+  { k: "hot", label: "热播榜", desc: "热门剧集" },
+  { k: "recommend", label: "推荐榜", desc: "精选推荐" },
+  { k: "potential", label: "飙升榜", desc: "人气上升" },
 ] as const;
 
 type RankKind = (typeof RANK_TABS)[number]["k"];
 
 export function RankPage({ onBack, wide }: { onBack: () => void; wide: boolean }) {
-  const { push, toast } = useStore();
+  const { push } = useStore();
   const [tab, setTab] = useState<RankKind>("hot");
-  const [all, setAll] = useState<VideoCard[]>([]);
+  const [items, setItems] = useState<RankItem[]>([]);
   const [loading, setLoading] = useState(true);
-  const [loadingMore, setLoadingMore] = useState(false);
-  const busy = useRef(false);
-  const loadedPages = useRef(0);
-  const totalPages = useRef(1);
+  const [err, setErr] = useState("");
+  const [attempt, setAttempt] = useState(0);
 
-  /* 拉取 AI成人短剧分类的全量数据，本地自算排序（不依赖上游不准的榜单接口） */
-  const loadAll = async (reset = false) => {
-    if (busy.current) return;
-    busy.current = true;
-    if (reset) { setLoading(true); setAll([]); loadedPages.current = 0; totalPages.current = 1; }
-    else setLoadingMore(true);
-    try {
-      let page = reset ? 1 : loadedPages.current + 1;
-      const first = await api.category("ai-duanju", page, 50);
-      let items = [...(first?.items || [])];
-      totalPages.current = first?.pagination?.pages || 1;
-      // 继续拉取剩余页，凑齐全量（保证「最新」等排序覆盖所有内容）
-      while (page < totalPages.current && page < 8) {
-        page += 1;
-        const r = await api.category("ai-duanju", page, 50);
-        items = items.concat(r?.items || []);
-      }
-      loadedPages.current = page;
-      setAll((prev) => {
-        const base = reset ? [] : prev;
-        const seen = new Set(base.map((x) => x.id));
-        return [...base, ...items.filter((x) => !seen.has(x.id))];
-      });
-    } catch (e) {
-      toast((e as Error).message || "榜单加载失败", "info");
-    } finally {
-      busy.current = false;
-      setLoading(false);
-      setLoadingMore(false);
-    }
-  };
+  useEffect(() => {
+    let alive = true;
+    setLoading(true);
+    setItems([]);
+    setErr("");
+    api.rank(tab)
+      .then((res) => { if (alive) setItems(res?.items || []); })
+      .catch((e) => { if (alive) setErr((e as Error).message || "榜单加载失败"); })
+      .finally(() => { if (alive) setLoading(false); });
+    return () => { alive = false; };
+  }, [tab, attempt]);
 
-  useEffect(() => { loadAll(true); /* eslint-disable-next-line */ }, []);
-
-  const at = (x: VideoCard) => {
-    const ep = x.last_ep_at || 0;
-    if (ep > 0) return ep;
-    const nw = x.new_at || 0;
-    if (nw > 0) return nw;
-    return x.created_at ? new Date(x.created_at.replace(" ", "T")).getTime() : 0;
-  };
-
-  const sorted = [...all].sort((a, b) => {
-    if (tab === "score") return (b.score || 0) - (a.score || 0);
-    if (tab === "new") return at(b) - at(a);
-    return (b.hot || 0) - (a.hot || 0);
-  });
-
-  const metric = (x: VideoCard) =>
-    tab === "score" ? x.score : tab === "new" ? at(x) : (x.hot || 0);
-  const maxMetric = Math.max(1, ...sorted.map(metric));
+  const maxMetric = Math.max(1, ...items.map((x) => Number(x.metric_value) || 0));
   const meta = RANK_TABS.find((t) => t.k === tab)!;
-  const ids = sorted.map((x) => x.id);
+  const ids = items.map((x) => x.video_id);
 
   return (
     <div className="absolute inset-0 bg-bg flex flex-col">
@@ -226,7 +186,7 @@ export function RankPage({ onBack, wide }: { onBack: () => void; wide: boolean }
                 <span className="w-9 h-9 rounded-(--r-sm) bg-pc text-on-pc flex items-center justify-center"><ITrophy size={20} /></span>
                 <span className="text-[24px] font-bold tracking-wide text-on">排行榜</span>
               </div>
-              <div className="text-[11px] text-mut mt-1">{meta.desc} · 实时计算</div>
+              <div className="text-[11px] text-mut mt-1">{meta.desc}</div>
             </div>
           </div>
           <div className="flex bg-s3 rounded-(--r-ctl) p-1 mt-3">
@@ -241,22 +201,14 @@ export function RankPage({ onBack, wide }: { onBack: () => void; wide: boolean }
       <div className="flex-1 scroll-y px-3.5 pt-3 pb-8">
         {loading ? (
           <div className="flex justify-center py-12"><div className="w-8 h-8 spinner" /></div>
-        ) : sorted.length ? (
-          <>
-            {sorted.map((v, i) => {
-              const val = metric(v);
-              const label = tab === "score" ? "评分" : tab === "new" ? "更新" : "热度";
-              return (
-                <RankRow key={v.id}
-                  item={{ rank: i + 1, video_id: v.id, title: v.title, cover: v.cover, tags: v.tags, score: v.score, metric_value: val, metric_label: label }}
-                  metricMax={maxMetric}
-                  onOpen={() => push({ kind: "feed", videoIds: ids, index: i, title: `排行榜 · ${meta.label}` })} />
-              );
-            })}
-            {loadingMore && <div className="flex justify-center py-3"><div className="w-6 h-6 spinner" /></div>}
-          </>
+        ) : items.length ? (
+          items.map((item, i) => (
+            <RankRow key={`${item.video_id}-${item.rank}`} item={item} metricMax={maxMetric}
+              onOpen={() => push({ kind: "feed", videoIds: ids, index: i, title: `排行榜 · ${meta.label}` })} />
+          ))
         ) : (
-          <Empty icon={<ITrophy size={26} />} title="榜单暂时为空" sub="稍后再来看看，或者去首页刷刷推荐" />
+          <Empty icon={<ITrophy size={26} />} title={err ? "榜单加载失败" : "榜单暂时为空"}
+            sub={err || "稍后再来看看，或者换个榜单"} action="重试" onAction={() => setAttempt((n) => n + 1)} />
         )}
         {wide && <div className="h-2" />}
       </div>

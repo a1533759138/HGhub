@@ -65,13 +65,13 @@ export const api = {
   me: () => call<User>("api_me"),
 
   feed: (page = 1, size = 20) => call<Paged<VideoCard>>("api_feed", { page, size }),
-  category: (cate: string, page = 1, size = 20) =>
-    call<Paged<VideoCard>>("api_category", { cate, page, size }),
+  category: (cate: string, page = 1, size = 20, sort: "latest" | "hot_window" | "random" = "latest") =>
+    call<Paged<VideoCard>>("api_category", { cate, page, size, sort }),
   rank: (kind: "hot" | "recommend" | "potential") =>
     call<{ type: string; items: RankItem[] }>("api_rank", { kind }),
   topics: (page = 1, size = 30) => call<Paged<Topic>>("api_topics", { page, size }),
-  topic: (slug: string) =>
-    call<{ topic: Topic; videos: Paged<VideoCard>; related?: VideoCard[] }>("api_topic", { slug }),
+  topic: (slug: string, page = 1, size = 20) =>
+    call<{ topic: Topic; videos: Paged<VideoCard>; related?: Topic[] }>("api_topic", { slug, page, size }),
   search: (q: string, page = 1, size = 20) =>
     call<{ items: VideoCard[]; pagination: Paged<VideoCard>["pagination"]; keyword: string }>(
       "api_search", { q, page, size },

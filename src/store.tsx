@@ -132,7 +132,14 @@ export const useStore = () => useContext(Ctx);
 let seq = 0;
 
 export function AppProvider({ children }: { children: React.ReactNode }) {
-  const [p, setP] = useState<Persist>(loadPersist);
+  const [p, commitPersist] = useState<Persist>(loadPersist);
+  // 同一事件内的连续操作也要读到最新值，不能依赖 React 何时执行 updater。
+  const persistRef = useRef(p);
+  const setP = useCallback((update: (s: Persist) => Persist) => {
+    const next = update(persistRef.current);
+    persistRef.current = next;
+    commitPersist(next);
+  }, []);
   const [theme, setThemeState] = useState<Theme>(readTheme);
   const [tab, setTabRaw] = useState<Tab>("home");
   const [stack, setStack] = useState<Page[]>([]);
@@ -171,27 +178,18 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   const pop = useCallback(() => setStack((s) => s.slice(0, -1)), []);
 
   const toggleLikeLocal = useCallback((id: number) => {
-    let on = false;
-    setP((s) => {
-      on = !s.likes.includes(id);
-      return { ...s, likes: on ? [id, ...s.likes] : s.likes.filter((x) => x !== id) };
-    });
+    const on = !persistRef.current.likes.includes(id);
+    setP((s) => ({ ...s, likes: on ? [id, ...s.likes] : s.likes.filter((x) => x !== id) }));
     return on;
   }, []);
   const toggleFavLocal = useCallback((id: number) => {
-    let on = false;
-    setP((s) => {
-      on = !s.favs.includes(id);
-      return { ...s, favs: on ? [id, ...s.favs] : s.favs.filter((x) => x !== id) };
-    });
+    const on = !persistRef.current.favs.includes(id);
+    setP((s) => ({ ...s, favs: on ? [id, ...s.favs] : s.favs.filter((x) => x !== id) }));
     return on;
   }, []);
   const toggleFollowLocal = useCallback((uid: number) => {
-    let on = false;
-    setP((s) => {
-      on = !s.follows.includes(uid);
-      return { ...s, follows: on ? [uid, ...s.follows] : s.follows.filter((x) => x !== uid) };
-    });
+    const on = !persistRef.current.follows.includes(uid);
+    setP((s) => ({ ...s, follows: on ? [uid, ...s.follows] : s.follows.filter((x) => x !== uid) }));
     return on;
   }, []);
   const addHistory = useCallback((id: number, ep?: number, t?: number, dur?: number) => {

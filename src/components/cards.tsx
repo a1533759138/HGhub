@@ -82,7 +82,9 @@ export function RankRow({ item, onOpen, metricMax }: {
         <div className="text-[12.5px] font-medium text-on clamp-2 leading-snug">{item.title}</div>
         <div className="flex items-center gap-2 mt-1.5">
           <span className="text-[10px] text-mut truncate">{item.tags?.slice(0, 2).join(" · ")}</span>
-          <span className="flex items-center gap-0.5 text-[10px] font-bold text-primary">{fmt(item.metric_value)}</span>
+          <span className="flex items-center gap-1 text-[10px] font-bold text-primary shrink-0">
+            <span className="font-normal text-mut">{item.metric_label}</span>{fmt(item.metric_value)}
+          </span>
         </div>
         <div className="mt-1.5 h-[3px] rounded-full bg-s4 overflow-hidden">
           <div className="h-full rounded-full bg-primary" style={{ width: `${Math.max(6, Math.round((item.metric_value / Math.max(1, metricMax)) * 100))}%` }} />

@@ -1,7 +1,7 @@
 {
   "name": "huangguo-client",
   "private": true,
-  "version": "1.1.5",
+  "version": "1.1.7",
   "license": "PolyForm-Noncommercial-1.0.0",
   "type": "module",
   "scripts": {
@@ -16,7 +16,8 @@
     "android:dev": "tauri android dev",
     "android:build": "tauri android build",
     "ios:init": "tauri ios init",
-    "ios:build": "tauri ios build"
+    "ios:build": "tauri ios build",
+    "test:channels": "node scripts/test-channels.cjs"
   },
   "dependencies": {
     "@tauri-apps/api": "^2.12.4",
