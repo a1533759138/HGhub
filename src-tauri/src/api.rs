@@ -273,20 +273,9 @@ pub async fn api_feed(state: State<'_, Api>, page: u32, size: u32) -> Result<Val
         .await
 }
 
-fn category_path(cate: &str, page: u32, size: u32, sort: &str) -> Result<String, String> {
+fn category_path(cate: &str, page: u32, size: u32) -> String {
     let cate = percent_encoding::utf8_percent_encode(cate, PATH_SEGMENT);
-    let mut path = format!("/api/videos/category/{cate}?page={}&size={}", page.max(1), size.clamp(1, 50));
-    match sort {
-        "latest" | "" => {}
-        "hot_window" | "random" => path.push_str(&format!("&sort={sort}")),
-        _ => return Err("不支持的排序方式".to_string()),
-    }
-    if sort == "random" {
-        let nonce = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_millis()).unwrap_or(0);
-        path.push_str(&format!("&_={nonce}"));
-    }
-    Ok(path)
+    format!("/api/videos/category/{cate}?page={}&size={}", page.max(1), size.clamp(1, 50))
 }
 
 #[tauri::command]
@@ -297,8 +286,12 @@ pub async fn api_category(
     size: u32,
     sort: Option<String>,
 ) -> Result<Value, String> {
-    let path = category_path(&cate, page, size, sort.as_deref().unwrap_or("latest"))?;
-    state.get(&path).await
+    match sort.as_deref().unwrap_or("latest") {
+        "latest" | "" => state.get(&category_path(&cate, page, size)).await,
+        // 当前公开 REST 拒绝这两个排序参数；沿用网站服务器渲染列表的实际顺序。
+        mode @ ("hot_window" | "random") => crate::catalog::category(&cate, page, mode).await,
+        _ => Err("不支持的排序方式".to_string()),
+    }
 }
 
 #[tauri::command]
@@ -515,11 +508,9 @@ mod tests {
     use super::{is_newer, category_path};
 
     #[test]
-    fn channel_sort_paths_match_site() {
-        assert_eq!(category_path("ai-duanju", 0, 20, "latest").unwrap(), "/api/videos/category/ai-duanju?page=1&size=20");
-        assert!(category_path("ai-duanju", 2, 20, "hot_window").unwrap().ends_with("page=2&size=20&sort=hot_window"));
-        assert!(category_path("ai-duanju", 1, 20, "random").unwrap().contains("&sort=random&_="));
-        assert!(category_path("ai-duanju", 1, 20, "score").is_err());
+    fn category_paths_bound_paging_and_encode_segments() {
+        assert_eq!(category_path("ai-duanju", 0, 20), "/api/videos/category/ai-duanju?page=1&size=20");
+        assert_eq!(category_path("a/b", 2, 500), "/api/videos/category/a%2Fb?page=2&size=50");
     }
 
     #[test]

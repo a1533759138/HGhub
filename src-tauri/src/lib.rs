@@ -1,4 +1,5 @@
 mod api;
+mod catalog;
 mod lines;
 mod media;
 mod net;

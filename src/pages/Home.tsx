@@ -1,8 +1,10 @@
 import { useEffect, useRef, useState } from "react";
+import { api } from "../api";
+import type { RankItem } from "../types";
 import { useStore } from "../store";
-import { Masonry } from "../components/cards";
+import { Masonry, RankRow } from "../components/cards";
 import { Empty } from "../components/ui";
-import { CHANNEL_SORTS, useChannelVideos, type ChannelSort } from "../hooks/useChannelVideos";
+import { useChannelVideos } from "../hooks/useChannelVideos";
 import { IBookmark, IRefresh, ISearch, ITrophy } from "../icons";
 
 /** 热门题材标签（与官网分类页标签栏一致） */
@@ -10,63 +12,37 @@ const HOT_TAGS = ["都市", "逆袭", "古风", "系统", "后宫", "校园", "�
 
 const CATE = "ai-duanju";
 
-export default function Home({ active, bottomInset }: { active: boolean; bottomInset: number }) {
-  const { push, setTab } = useStore();
-  const [tab, setTabKey] = useState<ChannelSort>("random");
+const HOME_TABS = [
+  { key: "hot", label: "热播榜" },
+  { key: "recommend", label: "推荐榜" },
+  { key: "potential", label: "飙升榜" },
+  { key: "random", label: "精选推荐" },
+] as const;
+type HomeTab = (typeof HOME_TABS)[number]["key"];
+type RankKind = Exclude<HomeTab, "random">;
+
+function RandomContent({ active, bottomInset }: { active: boolean; bottomInset: number }) {
+  const { push } = useStore();
   const [tag, setTag] = useState<string | null>(null);
-  const { items, page, pages, total, loading, error, loadMore, refresh, hasMore } = useChannelVideos(CATE, tab);
+  const { items, page, pages, total, loading, error, loadMore, refresh, hasMore } = useChannelVideos(CATE, "random");
   const sentinel = useRef<HTMLDivElement>(null);
   const filtered = tag ? items.filter((v) => (v.tags || []).includes(tag)) : items;
   const ids = filtered.map((v) => v.id);
-  const tabLabel = CHANNEL_SORTS.find((t) => t.key === tab)!.label;
 
   useEffect(() => {
     const el = sentinel.current;
     if (!el || !active || loading || error || !filtered.length || !hasMore) return;
-    const io = new IntersectionObserver((es) => { if (es[0].isIntersecting) loadMore(); }, { rootMargin: "300px" });
+    let watching = true;
+    const io = new IntersectionObserver((es) => { if (watching && es[0].isIntersecting) loadMore(); }, { rootMargin: "300px" });
     io.observe(el);
-    return () => io.disconnect();
+    return () => { watching = false; io.disconnect(); };
   }, [active, loading, error, filtered.length, hasMore, loadMore]);
 
   return (
-    <div className="absolute inset-0 bg-bg flex flex-col">
-      {/* 顶栏：标题 + 搜索/排行/专题入口 */}
-      <div className="shrink-0 px-4 pb-1" style={{ paddingTop: "calc(var(--sat, 0px) + 12px)" }}>
-        <div className="flex items-center gap-2.5">
-          <span className="text-[24px] font-bold text-on leading-none">AI成人短剧</span>
-          <span className="text-[11px] text-mut">精选热播 · 每周上新</span>
-          <div className="ml-auto flex items-center gap-1.5">
-            <button onClick={() => push({ kind: "topics" })} aria-label="专题"
-              className="w-10 h-10 rounded-full flex items-center justify-center text-on hover:bg-s3 pressable">
-              <IBookmark size={18} />
-            </button>
-            <button onClick={() => push({ kind: "ranks" })} aria-label="排行榜"
-              className="w-10 h-10 rounded-full flex items-center justify-center text-on hover:bg-s3 pressable">
-              <ITrophy size={19} />
-            </button>
-            <button onClick={() => setTab("search")} aria-label="搜索"
-              className="w-10 h-10 rounded-full flex items-center justify-center text-on hover:bg-s3 pressable">
-              <ISearch size={18} />
-            </button>
-          </div>
-        </div>
-      </div>
-
-      {/* 三标签栏 */}
-      <div className="shrink-0 px-4 pt-2 pb-1">
-        <div className="flex bg-s3 rounded-(--r-ctl) p-1">
-          {CHANNEL_SORTS.map((t) => (
-            <button key={t.key} onClick={() => setTabKey(t.key)}
-              className={`flex-1 h-9 rounded-(--r-ctl) text-[13px] font-semibold transition-all ${tab === t.key ? "tonal text-on-sec elev-1" : "text-mut"}`}
-              style={tab === t.key ? { background: "var(--p-sec)", color: "var(--p-primary)" } : undefined}>
-              {t.label}
-            </button>
-          ))}
-        </div>
-        <div className="flex items-center justify-between mt-2">
-          <span className="text-[11px] text-mut">{CHANNEL_SORTS.find((t) => t.key === tab)?.desc} · 已加载 {items.length}{total ? ` / ${total}` : ""} 部</span>
-          <button onClick={refresh} disabled={loading} className="flex items-center gap-1 text-[11px] text-primary disabled:opacity-40 pressable"><IRefresh size={12} />{tab === "random" ? "换一批" : "刷新"}</button>
-        </div>
+    <div className="flex-1 min-h-0 flex flex-col">
+      <div className="shrink-0 px-4 pt-2 pb-2 flex items-center justify-between">
+        <span className="text-[11px] text-mut">随机发现好剧 · 已加载 {items.length}{total ? ` / ${total}` : ""} 部</span>
+        <button onClick={refresh} disabled={loading || !active} className="flex items-center gap-1 text-[11px] text-primary disabled:opacity-40 pressable"><IRefresh size={12} />换一批</button>
       </div>
 
       {/* 热门题材标签筛选栏 */}
@@ -85,7 +61,7 @@ export default function Home({ active, bottomInset }: { active: boolean; bottomI
       <div className="flex-1 scroll-y px-4 pt-2" style={{ paddingBottom: `calc(${bottomInset}px + 24px)` }}>
         {filtered.length ? (
           <Masonry videos={filtered} wide={false}
-            onOpen={(v) => push({ kind: "feed", videoIds: ids, index: ids.findIndex((x) => x === v.id), title: `AI成人短剧 · ${tag ? tag + " · " : ""}${tabLabel}` })} />
+            onOpen={(v) => push({ kind: "feed", videoIds: ids, index: ids.findIndex((x) => x === v.id), title: `AI成人短剧 · ${tag ? tag + " · " : ""}精选推荐` })} />
         ) : loading ? (
           <div className="flex justify-center py-12"><div className="w-8 h-8 spinner" /></div>
         ) : (
@@ -96,12 +72,99 @@ export default function Home({ active, bottomInset }: { active: boolean; bottomI
         <div ref={sentinel} className="h-8" />
         {loading && filtered.length > 0 && <div className="flex justify-center py-3"><div className="w-6 h-6 spinner" /></div>}
         {!loading && filtered.length > 0 && (hasMore || error) && (
-          <div className="text-center py-3"><button onClick={loadMore} className="px-5 h-9 rounded-(--r-ctl) bg-s3 text-[12px] text-on pressable">{error ? "加载失败，点击重试" : "加载更多"}</button></div>
+          <div className="text-center py-3"><button onClick={loadMore} disabled={!active} className="px-5 h-9 rounded-(--r-ctl) bg-s3 text-[12px] text-on pressable disabled:opacity-40">{error ? "加载失败，点击重试" : "加载更多"}</button></div>
         )}
         {!loading && page >= pages && filtered.length > 0 && (
           <div className="text-center text-[10.5px] text-dim py-3">— 已经到底啦 —</div>
         )}
       </div>
+    </div>
+  );
+}
+
+/** 首次可见才启动随机请求；之后离开首页保留列表，并停止滚动预取。 */
+function RandomSection({ active, bottomInset }: { active: boolean; bottomInset: number }) {
+  const [started, setStarted] = useState(active);
+  useEffect(() => { if (active) setStarted(true); }, [active]);
+  return started ? <RandomContent active={active} bottomInset={bottomInset} /> : null;
+}
+
+export default function Home({ active, bottomInset }: { active: boolean; bottomInset: number }) {
+  const { push, setTab } = useStore();
+  const [tab, setTabKey] = useState<HomeTab>("hot");
+  const [revision, setRevision] = useState(0);
+  const [ranking, setRanking] = useState<{
+    kind: RankKind; revision: number; items: RankItem[]; loading: boolean; error: string;
+  }>({ kind: "hot", revision: 0, items: [], loading: true, error: "" });
+  const completed = useRef<{ kind: RankKind; revision: number } | null>(null);
+
+  useEffect(() => {
+    if (!active || tab === "random") return;
+    if (completed.current?.kind === tab && completed.current.revision === revision) return;
+    let alive = true;
+    setRanking({ kind: tab, revision, items: [], loading: true, error: "" });
+    api.rank(tab)
+      .then((res) => {
+        if (!alive) return;
+        completed.current = { kind: tab, revision };
+        setRanking({ kind: tab, revision, items: res?.items || [], loading: false, error: "" });
+      })
+      .catch((e) => {
+        if (alive) setRanking({ kind: tab, revision, items: [], loading: false, error: (e as Error).message || "榜单加载失败" });
+      });
+    return () => { alive = false; };
+  }, [active, tab, revision]);
+
+  const rank = ranking.kind === tab && ranking.revision === revision
+    ? ranking : { items: [], loading: true, error: "" };
+  const ids = rank.items.map((item) => item.video_id);
+  const metricMax = Math.max(1, ...rank.items.map((item) => Number(item.metric_value) || 0));
+  const label = HOME_TABS.find((item) => item.key === tab)!.label;
+  const refreshRanking = () => setRevision((n) => n + 1);
+
+  return (
+    <div className="absolute inset-0 bg-bg flex flex-col">
+      <div className="shrink-0 px-4 pb-1" style={{ paddingTop: "calc(var(--sat, 0px) + 12px)" }}>
+        <div className="flex items-center gap-2.5">
+          <span className="text-[24px] font-bold text-on leading-none">AI成人短剧</span>
+          <div className="ml-auto flex items-center gap-1.5">
+            <button onClick={() => push({ kind: "topics" })} aria-label="专题"
+              className="w-10 h-10 rounded-full flex items-center justify-center text-on hover:bg-s3 pressable"><IBookmark size={18} /></button>
+            <button onClick={() => setTab("search")} aria-label="搜索"
+              className="w-10 h-10 rounded-full flex items-center justify-center text-on hover:bg-s3 pressable"><ISearch size={18} /></button>
+          </div>
+        </div>
+      </div>
+
+      <div className="shrink-0 px-4 pt-2 pb-1">
+        <div role="tablist" aria-label="首页内容" className="flex gap-1 overflow-x-auto bg-s3 rounded-(--r-ctl) p-1 scroll-x">
+          {HOME_TABS.map((item) => (
+            <button key={item.key} role="tab" aria-selected={tab === item.key}
+              onClick={() => { if (tab !== item.key) { setTabKey(item.key); setRevision((n) => n + 1); } }}
+              className={`flex-1 shrink-0 whitespace-nowrap px-2 h-9 rounded-(--r-ctl) text-[13px] font-semibold transition-all ${tab === item.key ? "tonal text-on-sec elev-1" : "text-mut"}`}
+              style={tab === item.key ? { background: "var(--p-sec)", color: "var(--p-primary)" } : undefined}>{item.label}</button>
+          ))}
+        </div>
+      </div>
+
+      {tab === "random" ? <RandomSection active={active} bottomInset={bottomInset} /> : (
+        <>
+          <div className="shrink-0 px-4 pt-2 pb-2 flex items-center justify-between">
+            <span className="text-[11px] text-mut">{label}{rank.items.length ? ` · ${rank.items.length} 部` : ""}</span>
+            <button onClick={refreshRanking} disabled={rank.loading || !active} className="flex items-center gap-1 text-[11px] text-primary pressable disabled:opacity-40"><IRefresh size={12} />刷新</button>
+          </div>
+          <div className="flex-1 scroll-y px-4 pt-2" style={{ paddingBottom: `calc(${bottomInset}px + 24px)` }}>
+            {rank.loading ? <div className="flex justify-center py-12"><div className="w-8 h-8 spinner" /></div>
+              : rank.items.length ? rank.items.map((item, index) => (
+                <RankRow key={`${item.video_id}-${item.rank}`} item={item} metricMax={metricMax}
+                  onOpen={() => push({ kind: "feed", videoIds: ids, index, title: `排行榜 · ${label}` })} />
+              )) : (
+                <Empty icon={<ITrophy size={26} />} title={rank.error ? "榜单加载失败" : "榜单暂时为空"}
+                  sub={rank.error || "换个榜单看看，或稍后刷新"} action="重试" onAction={refreshRanking} />
+              )}
+          </div>
+        </>
+      )}
     </div>
   );
 }

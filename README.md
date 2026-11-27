@@ -120,14 +120,16 @@ pnpm ios:build        # 有开发者证书时直接出签名 IPA
 ## 本地验证
 
 ```bash
+pnpm test                          # 首页、分类、排行榜、专题和播放重试的离线回归（或 npm test）
 pnpm build                         # 类型检查与生产构建
 node scripts/test-channels.cjs      # 分类排序、分页、刷新和竞态的离线回归
 cargo test --manifest-path src-tauri/Cargo.toml --lib
 ```
 
 默认 Rust 测试不请求上游；依赖实时线路或时效媒体地址的烟雾测试需要显式使用 `--ignored`。
-首页的精选推荐使用服务端 `sort=random`，当前热播使用 `sort=hot_window`；
-排行榜使用服务端热播、推荐、飙升三种榜单，专题按需分页，不在启动时抓取全量数据。
+首页直接展示服务端热播、推荐、飙升三种榜单，另保留精选推荐标签。
+分类的精选推荐与当前热播沿用对应公开网页的服务器列表顺序（兼容目前不接受排序参数的 REST）；
+专题按需分页，不在启动时抓取全量数据。
 
 ## 免责声明
 

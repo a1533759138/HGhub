@@ -468,31 +468,157 @@ pub async fn fetch_bytes(url: &str) -> Result<(Option<String>, Vec<u8>), String>
     with_retry(|client: reqwest::Client| {
         let url = url.clone();
         let referer = referer.clone();
-        async move {
-            let resp = client
-                .get(&url)
-                .header("Referer", &referer)
-                .send()
-                .await
-                .map_err(|e| err_text(&e))?;
-            if !resp.status().is_success() {
-                return Err(format!("HTTP {}", resp.status()));
-            }
-            let ctype = resp
-                .headers()
-                .get(reqwest::header::CONTENT_TYPE)
-                .and_then(|v| v.to_str().ok())
-                .map(|s| s.to_string());
-            let bytes = resp.bytes().await.map_err(|e| err_text(&e))?.to_vec();
-            Ok((ctype, bytes))
-        }
+        async move { fetch_bytes_once(&client, &url, &referer).await }
     })
     .await
+}
+
+async fn fetch_bytes_once(
+    client: &reqwest::Client,
+    url: &str,
+    referer: &str,
+) -> Result<(Option<String>, Vec<u8>), String> {
+    let resp = client
+        .get(url)
+        .header("Referer", referer)
+        .send()
+        .await
+        .map_err(|e| err_text(&e))?;
+    if !resp.status().is_success() {
+        return Err(format!("HTTP {}", resp.status()));
+    }
+    let ctype = resp
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string());
+    let bytes = resp.bytes().await.map_err(|e| err_text(&e))?.to_vec();
+    Ok((ctype, bytes))
+}
+
+/// 公开目录页与 REST 共用自动换线；返回实际来源，供解析相对封面地址使用。
+/// 媒体 URL 仍由 fetch_bytes 直接请求，不触发站点线路切换。
+pub async fn fetch_public_page(path: &str) -> Result<(String, Vec<u8>), String> {
+    fetch_public_page_using(base(), path, |current| async move {
+        failover_once(&current).await
+    })
+    .await
+}
+
+async fn fetch_public_page_using<F, Fut>(
+    current: String,
+    path: &str,
+    recover: F,
+) -> Result<(String, Vec<u8>), String>
+where
+    F: FnOnce(String) -> Fut,
+    Fut: std::future::Future<Output = Option<String>>,
+{
+    let url = format!("{}{path}", current.trim_end_matches('/'));
+    let referer = format!("{current}/");
+    let first = fetch_bytes_once(client().as_ref(), &url, &referer).await;
+    match first {
+        Ok((_, bytes)) => Ok((current, bytes)),
+        Err(error) => {
+            heal_client(&error);
+            let next = if is_line_error(&error) {
+                recover(current.clone()).await.unwrap_or(current)
+            } else {
+                current
+            };
+            let url = format!("{}{path}", next.trim_end_matches('/'));
+            let (_, bytes) = fetch_bytes(&url).await?;
+            Ok((next, bytes))
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn public_page_server(
+        status: &str,
+        body: &str,
+    ) -> (
+        String,
+        std::sync::mpsc::Receiver<String>,
+        std::thread::JoinHandle<()>,
+    ) {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let origin = format!("http://{}", listener.local_addr().unwrap());
+        let response = format!(
+            "HTTP/1.1 {status}\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        );
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let thread = std::thread::spawn(move || {
+            let (mut socket, _) = listener.accept().unwrap();
+            socket
+                .set_read_timeout(Some(Duration::from_secs(3)))
+                .unwrap();
+            let mut request = [0u8; 4096];
+            let size = socket.read(&mut request).unwrap();
+            sender
+                .send(String::from_utf8_lossy(&request[..size]).into_owned())
+                .unwrap();
+            socket.write_all(response.as_bytes()).unwrap();
+        });
+        (origin, receiver, thread)
+    }
+
+    #[tokio::test]
+    async fn public_page_success_keeps_current_line() {
+        let (origin, request, server) = public_page_server("200 OK", "<main>catalog</main>");
+        let result = tokio::time::timeout(
+            Duration::from_secs(5),
+            fetch_public_page_using(origin.clone(), "/ai-duanju/random/", |_| async {
+                panic!("a working page must not change lines")
+            }),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(result, (origin, b"<main>catalog</main>".to_vec()));
+        assert!(request
+            .recv()
+            .unwrap()
+            .starts_with("GET /ai-duanju/random/ HTTP/1.1"));
+        server.join().unwrap();
+    }
+
+    #[tokio::test]
+    async fn public_page_recovers_after_first_line_error_and_returns_actual_origin() {
+        let (origin, first_request, first_server) =
+            public_page_server("404 Not Found", "unavailable");
+        let (alternate, next_request, next_server) =
+            public_page_server("200 OK", "<main>fallback</main>");
+        let expected_origin = origin.clone();
+        let expected_alternate = alternate.clone();
+        let result = tokio::time::timeout(
+            Duration::from_secs(5),
+            fetch_public_page_using(origin, "/ai-duanju/random/2/", |failed| async move {
+                assert_eq!(failed, expected_origin);
+                Some(alternate)
+            }),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            result,
+            (expected_alternate, b"<main>fallback</main>".to_vec())
+        );
+        for request in [first_request, next_request] {
+            assert!(request
+                .recv()
+                .unwrap()
+                .starts_with("GET /ai-duanju/random/2/ HTTP/1.1"));
+        }
+        first_server.join().unwrap();
+        next_server.join().unwrap();
+    }
 
     #[test]
     fn parses_success_and_empty_responses() {
