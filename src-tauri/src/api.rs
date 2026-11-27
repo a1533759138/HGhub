@@ -350,6 +350,20 @@ pub async fn api_post(state: State<'_, Api>, id: i64) -> Result<Value, String> {
     state.get(&format!("/api/posts/{id}")).await
 }
 
+/* ───────────────────────── 专题 ───────────────────────── */
+
+/// 专题列表：`GET /api/topics` → `{items:[{id,title,slug,cover,intro,video_count}], pagination}`
+#[tauri::command]
+pub async fn api_topics(state: State<'_, Api>, page: u32, size: u32) -> Result<Value, String> {
+    state.get(&format!("/api/topics?page={page}&size={size}")).await
+}
+
+/// 专题详情：`GET /api/topics/{slug}` → `{topic:{...}, videos:{items:[...], pagination}, related:[...]}`
+#[tauri::command]
+pub async fn api_topic(state: State<'_, Api>, slug: String) -> Result<Value, String> {
+    state.get(&format!("/api/topics/{slug}")).await
+}
+
 /* ───────────────────────── 详情 / 播放 ───────────────────────── */
 
 #[tauri::command]

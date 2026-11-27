@@ -36,6 +36,8 @@ export const IPlus = S(<><path d="M12 5v14" /><path d="M5 12h14" /></>);
 export const ICheck = S(<path d="m4.5 12.5 5 5 10-11" />);
 export const IClose = S(<><path d="m6 6 12 12" /><path d="M18 6 6 18" /></>);
 export const ITrophy = S(<><path d="M8 4h8v6a4 4 0 0 1-8 0Z" /><path d="M8 5H4.5v1.5A3.5 3.5 0 0 0 8 10" /><path d="M16 5h3.5v1.5A3.5 3.5 0 0 1 16 10" /><path d="M12 14v3.5" /><path d="M8 20.5h8" /><path d="M9.5 17.5h5v3h-5Z" /></>);
+export const IBookmark = S(<path d="M6.5 3.5h11a1 1 0 0 1 1 1V21l-6.5-4L5.5 21V4.5a1 1 0 0 1 1-1Z" />);
+export const IBookmarkF = S(<path d="M6.5 3.5h11a1 1 0 0 1 1 1V21l-6.5-4L5.5 21V4.5a1 1 0 0 1 1-1Z" />, true);
 export const IFireF = S(<path d="M12.6 2.6c.3-.3.9-.1.9.4.1 1.7.6 3.4 2 4.9 1.7 1.8 3.5 3.7 3.5 6.6 0 4-3.1 7-7 7s-7-3-7-7c0-2.3 1.1-4.2 2.4-5.6.3-.3.9-.1 1 .3.2.8.5 1.5 1.1 2 .1-3.1 1.2-6.5 3.1-8.6Z" />, true);
 export const ITrendUp = S(<path d="m4 16 5-5 3.5 3.5L20 8m0 0h-5m5 0v5" />);
 export const ITrendDown = S(<path d="m4 8 5 5 3.5-3.5L20 16m0 0h-5m5 0v-5" />);

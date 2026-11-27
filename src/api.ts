@@ -1,6 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import type {
-  CommentPage, Detail, Paged, PlayInfo, Post, RankItem, User, VideoCard,
+  CommentPage, Detail, Paged, PlayInfo, Post, RankItem, Topic, User, VideoCard,
 } from "./types";
 
 /* ── 运行环境 ───────────────────────────────────────────── */
@@ -69,6 +69,9 @@ export const api = {
     call<Paged<VideoCard>>("api_category", { cate, page, size }),
   rank: (kind: "hot" | "recommend" | "potential") =>
     call<{ type: string; items: RankItem[] }>("api_rank", { kind }),
+  topics: (page = 1, size = 30) => call<Paged<Topic>>("api_topics", { page, size }),
+  topic: (slug: string) =>
+    call<{ topic: Topic; videos: Paged<VideoCard>; related?: VideoCard[] }>("api_topic", { slug }),
   search: (q: string, page = 1, size = 20) =>
     call<{ items: VideoCard[]; pagination: Paged<VideoCard>["pagination"]; keyword: string }>(
       "api_search", { q, page, size },

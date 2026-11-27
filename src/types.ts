@@ -1,5 +1,14 @@
 export type Author = { id: number; name: string; avatar?: string; followers?: number };
 
+export type Topic = {
+  id: number;
+  title: string;
+  slug: string;
+  cover?: string;
+  intro?: string;
+  video_count?: number;
+};
+
 export type VideoCard = {
   id: number;
   title: string;
