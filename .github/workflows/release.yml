@@ -197,7 +197,8 @@ jobs:
     name: iOS (unsigned ipa)
     needs: plan
     if: needs.plan.outputs.ios == 'true'
-    runs-on: macos-latest
+    # 固定受支持的 Intel 镜像；设备目标仍为 aarch64-apple-ios。
+    runs-on: macos-15-intel
     steps:
       - uses: actions/checkout@v4
 
