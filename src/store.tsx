@@ -23,7 +23,7 @@ export type FeedContext = {
 
 export type Page =
   | FeedContext
-  | { kind: "channel"; key: string; cate: string; name: string }
+  | { kind: "channel"; key: string; cate: string; name: string; sort?: "latest" | "hot" | "hot_window" | "random"; originalOnly?: boolean; tag?: string }
   | { kind: "ranks"; key: string }
   | { kind: "topics"; key: string }
   | { kind: "topic"; key: string; slug: string; name: string }
@@ -33,7 +33,7 @@ export type Page =
 
 export type PageInput =
   | { kind: "feed"; videoIds: number[]; index: number; title: string; source?: string; feedKind?: "video" | "post"; startEp?: number; startTime?: number }
-  | { kind: "channel"; cate: string; name: string }
+  | { kind: "channel"; cate: string; name: string; sort?: "latest" | "hot" | "hot_window" | "random"; originalOnly?: boolean; tag?: string }
   | { kind: "ranks" }
   | { kind: "topics" }
   | { kind: "topic"; slug: string; name: string }

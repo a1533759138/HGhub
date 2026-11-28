@@ -14,6 +14,13 @@ pub async fn category(cate: &str, page: u32, sort: &str) -> Result<Value, String
     parse_page(&base, page, panel, html)
 }
 
+/// 官网首页的精选推荐是独立 SSR 网格，不等同于随机分类或推荐榜。
+pub async fn home_featured() -> Result<Value, String> {
+    let (base, bytes) = crate::net::fetch_public_page("/").await?;
+    let html = std::str::from_utf8(&bytes).map_err(|_| "首页编码无效".to_string())?;
+    parse_home_featured(&base, html)
+}
+
 fn category_path(cate: &str, page: u32, sort: &str) -> Result<(&'static str, String), String> {
     if cate != "ai-duanju" {
         return Err("HTML 分类兼容层不支持此分类".to_string());
@@ -236,6 +243,27 @@ fn parse_page(base: &str, requested_page: u32, panel: &str, source: &str) -> Res
     }))
 }
 
+fn parse_home_featured(base: &str, source: &str) -> Result<Value, String> {
+    let html = Html::parse_document(source);
+    let grid = html
+        .select(&selector(".hg-home-featured-grid")?)
+        .next()
+        .ok_or_else(|| "首页缺少精选推荐内容区域，请检查线路或网站结构".to_string())?;
+    let selectors = CardSelectors::new()?;
+    let items: Vec<Value> = grid
+        .select(&selector(".hg-drama-card")?)
+        .map(|card| parse_card(card, base, &selectors))
+        .collect::<Result<_, _>>()?;
+    if items.is_empty() {
+        return Err("首页精选推荐暂无可用内容".to_string());
+    }
+    let count = items.len();
+    Ok(json!({
+        "items": items,
+        "pagination": { "page": 1, "pages": 1, "size": count, "total": count },
+    }))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -328,6 +356,25 @@ mod tests {
             result["pagination"],
             json!({ "page": 1, "pages": 3, "size": 39, "total": 80 })
         );
+    }
+
+    #[test]
+    fn homepage_featured_reads_only_the_curated_grid_in_server_order() {
+        let cards = [41, 7, 99].into_iter().map(card).collect::<String>();
+        let html = format!(
+            "<aside>{}</aside><section class=\"hg-home-featured-grid\">{cards}</section><section>{}</section>",
+            card(800),
+            card(900)
+        );
+        let result = parse_home_featured("https://catalog.example/", &html).unwrap();
+        let items = result["items"].as_array().unwrap();
+        assert_eq!(
+            items.iter().map(|item| item["id"].as_u64().unwrap()).collect::<Vec<_>>(),
+            vec![41, 7, 99]
+        );
+        assert_eq!(items[0]["title"], "山城 & 来信 41");
+        assert_eq!(result["pagination"], json!({ "page": 1, "pages": 1, "size": 3, "total": 3 }));
+        assert!(parse_home_featured("https://catalog.example/", "<main>no curated grid</main>").is_err());
     }
 
     #[test]

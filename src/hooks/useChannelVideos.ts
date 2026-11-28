@@ -2,15 +2,16 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { api } from "../api";
 import type { VideoCard } from "../types";
 
-export type ChannelSort = "latest" | "hot_window" | "random";
+export type ChannelSort = "latest" | "hot" | "hot_window" | "random";
 export const CHANNEL_SORTS: { key: ChannelSort; label: string; desc: string }[] = [
   { key: "latest", label: "最近更新", desc: "最新上架" },
+  { key: "hot", label: "热播短剧", desc: "站内热播" },
   { key: "hot_window", label: "当前热播", desc: "近期热门" },
   { key: "random", label: "精选推荐", desc: "随机发现好剧" },
 ];
 
 /** 每次排序/刷新创建独立请求代次，旧响应不能覆盖新列表。 */
-export function useChannelVideos(cate: string, sort: ChannelSort) {
+export function useChannelVideos(cate: string, sort: ChannelSort, original = false) {
   const [items, setItems] = useState<VideoCard[]>([]);
   const [page, setPage] = useState(0);
   const [pages, setPages] = useState(1);
@@ -29,7 +30,7 @@ export function useChannelVideos(cate: string, sort: ChannelSort) {
     setLoading(true);
     setError("");
     try {
-      const res = await api.category(cate, next, 20, sort);
+      const res = await api.category(cate, next, 20, sort, original);
       if (!mounted.current || version !== generation.current) return;
       setItems((prev) => {
         const base = replace ? [] : prev;
@@ -51,7 +52,7 @@ export function useChannelVideos(cate: string, sort: ChannelSort) {
         setLoading(false);
       }
     }
-  }, [cate, sort]);
+  }, [cate, sort, original]);
 
   useEffect(() => {
     const version = ++generation.current;

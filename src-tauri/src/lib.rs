@@ -54,6 +54,8 @@ pub fn run() {
             api::api_register,
             api::api_logout,
             api::api_me,
+            api::api_home,
+            api::api_home_featured,
             api::api_feed,
             api::api_category,
             api::api_rank,

@@ -3,6 +3,16 @@ import type {
   CommentPage, Detail, Paged, PlayInfo, Post, RankItem, Topic, User, VideoCard,
 } from "./types";
 
+export type HomeVideo = Pick<VideoCard, "id" | "title" | "cover"> & Partial<Omit<VideoCard, "id" | "title" | "cover">> & {
+  badge?: string;
+  play_at?: string;
+};
+export type HomeData = {
+  featured?: HomeVideo[];
+  latest?: HomeVideo[];
+  topic_rec?: Topic[];
+};
+
 /* ── 运行环境 ───────────────────────────────────────────── */
 
 /** 应用版本（构建时由 vite.config.ts 从 package.json 注入） */
@@ -65,8 +75,10 @@ export const api = {
   me: () => call<User>("api_me"),
 
   feed: (page = 1, size = 20) => call<Paged<VideoCard>>("api_feed", { page, size }),
-  category: (cate: string, page = 1, size = 20, sort: "latest" | "hot_window" | "random" = "latest") =>
-    call<Paged<VideoCard>>("api_category", { cate, page, size, sort }),
+  home: () => call<HomeData>("api_home"),
+  homeFeatured: () => call<Paged<VideoCard>>("api_home_featured"),
+  category: (cate: string, page = 1, size = 20, sort: "latest" | "hot" | "hot_window" | "random" = "latest", original = false) =>
+    call<Paged<VideoCard>>("api_category", { cate, page, size, sort, original }),
   rank: (kind: "hot" | "recommend" | "potential") =>
     call<{ type: string; items: RankItem[] }>("api_rank", { kind }),
   topics: (page = 1, size = 30) => call<Paged<Topic>>("api_topics", { page, size }),

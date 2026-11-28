@@ -1,6 +1,6 @@
 import React, { useEffect, useRef, useState } from "react";
 import Hls from "hls.js";
-import { fmtTime, playlist } from "../api";
+import { fmtTime, isIOS, playlist } from "../api";
 import { ICompress, IExpand, IPauseF, IPlayF, IVol, IVolMute } from "../icons";
 
 type Props = {
@@ -43,8 +43,10 @@ export default function Player({
       const hls = new Hls({
         enableWorker: true,
         lowLatencyMode: false,
-        maxBufferLength: 24,
-        backBufferLength: 30,
+        maxBufferLength: isIOS ? 16 : 24,
+        maxMaxBufferLength: isIOS ? 24 : 48,
+        maxBufferSize: isIOS ? 24 * 1024 * 1024 : 60 * 1024 * 1024,
+        backBufferLength: isIOS ? 6 : 30,
         manifestLoadingTimeOut: 20000,
         manifestLoadingMaxRetry: 3,
         fragLoadingMaxRetry: 4,

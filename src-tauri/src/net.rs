@@ -450,15 +450,23 @@ pub async fn edge(
     }
 
     if value.get("status").and_then(|v| v.as_i64()) == Some(1) {
-        Ok(value.get("data").cloned().unwrap_or(Value::Null))
-    } else {
-        Err(value
-            .get("msg")
-            .and_then(|v| v.as_str())
-            .filter(|s| !s.is_empty())
-            .unwrap_or("接口返回失败")
-            .to_string())
+        return Ok(value.get("data").cloned().unwrap_or(Value::Null));
     }
+
+    // The current REST gateway returns a data envelope without the legacy
+    // `status: 1` field (for example, the comments endpoint responds as
+    // `{ "data": { "items": [...] } }`).  Accept that success shape too;
+    // otherwise every comments request is reported as "接口返回失败".
+    if value.get("status").is_none() && value.get("data").is_some() {
+        return Ok(value.get("data").cloned().unwrap_or(Value::Null));
+    }
+
+    Err(value
+        .get("msg")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .unwrap_or("接口返回失败")
+        .to_string())
 }
 
 /// 拉原始字节（图片 / m3u8 / 分片）。
@@ -630,6 +638,16 @@ mod tests {
         assert!(parse_response(reqwest::StatusCode::NO_CONTENT, "  ")
             .unwrap()
             .is_null());
+    }
+
+    #[test]
+    fn accepts_data_only_rest_envelopes() {
+        let value = json!({ "data": { "ep": 1, "items": [] } });
+        let parsed = parse_response(reqwest::StatusCode::OK, &value.to_string()).unwrap();
+        assert_eq!(parsed, value);
+
+        let data = value.get("data").cloned().unwrap_or(Value::Null);
+        assert_eq!(data, json!({ "ep": 1, "items": [] }));
     }
 
     #[test]

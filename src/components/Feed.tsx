@@ -717,18 +717,6 @@ export default function Feed({ videoIds, startIndex = 0, title = "", mode, kind 
                       className="px-4 flex items-center gap-0.5 text-[10.5px] font-medium hg-ink hg-ov-shadow pressable">
                       详情 · 第 {curEp} 集<IChevR size={11} />
                     </button>
-                    <div ref={barRef} className="mx-4 mt-2 relative" style={{ height: 14, touchAction: "none" }}
-                      onPointerDown={onBarDown} onPointerMove={onBarMove} onPointerUp={onBarUp} onPointerCancel={onBarUp}>
-                      <div className="absolute inset-x-0 top-1/2 -translate-y-1/2 h-[2.5px] rounded-full" style={{ background: "rgba(255,255,255,.3)" }}>
-                        <div className="h-full rounded-full bg-white"
-                          style={{ width: `${barProgress * 100}%`, transition: barPct !== null ? "none" : "width .25s linear" }} />
-                      </div>
-                      {barPct !== null && (
-                        <div className="absolute left-1/2 -translate-x-1/2 -top-8 px-2.5 py-1 rounded-md hg-chip-strong backdrop-blur-md text-[12px] font-bold tabular-nums whitespace-nowrap">
-                          {fmtTime(barPct * (duration || 0))}
-                        </div>
-                      )}
-                    </div>
                   </div>
                 </div>
               )}

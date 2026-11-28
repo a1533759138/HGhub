@@ -71,7 +71,7 @@ function StackPage({ page, onBack, wide, top, bottomInset }: {
         mode="context" active={top} bottomInset={bottomInset} onBack={onBack} />
     );
   }
-  if (page.kind === "channel") return <ChannelPage cate={page.cate} name={page.name} onBack={onBack} wide={wide} />;
+  if (page.kind === "channel") return <ChannelPage cate={page.cate} name={page.name} sort={page.sort} originalOnly={page.originalOnly} initialTag={page.tag} onBack={onBack} wide={wide} />;
   if (page.kind === "ranks") return <RankPage onBack={onBack} wide={wide} />;
   if (page.kind === "topics") return <TopicsPage onBack={onBack} wide={wide} />;
   if (page.kind === "topic") return <TopicPage slug={page.slug} name={page.name} onBack={onBack} wide={wide} />;

@@ -1,6 +1,6 @@
 import { useEffect, useImperativeHandle, useRef, forwardRef, useState } from "react";
 import Hls from "hls.js";
-import { isLocalMedia, playlist } from "../api";
+import { isIOS, isLocalMedia, playlist } from "../api";
 
 export type VideoHandle = {
   el: () => HTMLVideoElement | null;
@@ -106,9 +106,10 @@ const VideoSurface = forwardRef<VideoHandle, Props>(function VideoSurface(
          常常只回收视频轨，表现为「有声音、画面不动」。网络上的提速交给 Rust 侧的分片预取 */
       const hls = new Hls({
         enableWorker: true,
-        maxBufferLength: 30,
-        maxMaxBufferLength: 60,
-        backBufferLength: 30,
+        maxBufferLength: isIOS ? 16 : 30,
+        maxMaxBufferLength: isIOS ? 24 : 60,
+        maxBufferSize: isIOS ? 24 * 1024 * 1024 : 60 * 1024 * 1024,
+        backBufferLength: isIOS ? 6 : 30,
         manifestLoadingTimeOut: 20000,
         manifestLoadingMaxRetry: 3,
         fragLoadingMaxRetry: 4,

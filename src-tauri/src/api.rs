@@ -267,6 +267,35 @@ pub async fn api_me(state: State<'_, Api>) -> Result<Value, String> {
 /* ───────────────────────── 列表 ───────────────────────── */
 
 #[tauri::command]
+pub async fn api_home(state: State<'_, Api>) -> Result<Value, String> {
+    let mut data = state.get("/api/home").await?;
+    normalize_home_assets(&mut data, &base());
+    Ok(data)
+}
+
+#[tauri::command]
+pub async fn api_home_featured() -> Result<Value, String> {
+    crate::catalog::home_featured().await
+}
+
+fn normalize_home_assets(data: &mut Value, base: &str) {
+    let Some(data) = data.as_object_mut() else { return; };
+    for section in ["featured", "latest", "topic_rec"] {
+        let Some(items) = data.get_mut(section).and_then(Value::as_array_mut) else { continue; };
+        for item in items {
+            for field in ["cover", "image"] {
+                let Some(path) = item.get(field).and_then(Value::as_str).map(str::to_string) else { continue; };
+                if path.starts_with('/') {
+                    if let Ok(url) = url::Url::parse(base).and_then(|origin| origin.join(&path)) {
+                        item[field] = Value::String(url.to_string());
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[tauri::command]
 pub async fn api_feed(state: State<'_, Api>, page: u32, size: u32) -> Result<Value, String> {
     state
         .get(&format!("/api/videos?page={page}&size={size}"))
@@ -278,6 +307,20 @@ fn category_path(cate: &str, page: u32, size: u32) -> String {
     format!("/api/videos/category/{cate}?page={}&size={}", page.max(1), size.clamp(1, 50))
 }
 
+fn category_query(cate: &str, page: u32, size: u32, sort: &str, original: bool) -> String {
+    let mut path = category_path(cate, page, size);
+    if sort == "hot" {
+        path.push_str("&sort=hot");
+    }
+    if original {
+        path.push_str("&is_original=1");
+        if sort == "latest" || sort.is_empty() {
+            path.push_str("&sort=latest");
+        }
+    }
+    path
+}
+
 #[tauri::command]
 pub async fn api_category(
     state: State<'_, Api>,
@@ -285,11 +328,20 @@ pub async fn api_category(
     page: u32,
     size: u32,
     sort: Option<String>,
+    original: Option<bool>,
 ) -> Result<Value, String> {
-    match sort.as_deref().unwrap_or("latest") {
-        "latest" | "" => state.get(&category_path(&cate, page, size)).await,
+    let sort = sort.as_deref().unwrap_or("latest");
+    match sort {
+        "latest" | "" | "hot" => {
+            state.get(&category_query(&cate, page, size, sort, original.unwrap_or(false))).await
+        }
         // 当前公开 REST 拒绝这两个排序参数；沿用网站服务器渲染列表的实际顺序。
-        mode @ ("hot_window" | "random") => crate::catalog::category(&cate, page, mode).await,
+        mode @ ("hot_window" | "random") => {
+            if original.unwrap_or(false) {
+                return Err("此排序暂不支持原创筛选".to_string());
+            }
+            crate::catalog::category(&cate, page, mode).await
+        }
         _ => Err("不支持的排序方式".to_string()),
     }
 }
@@ -505,12 +557,27 @@ pub async fn api_post_comments(
 }
 #[cfg(test)]
 mod tests {
-    use super::{is_newer, category_path};
+    use super::{category_path, category_query, is_newer};
 
     #[test]
     fn category_paths_bound_paging_and_encode_segments() {
         assert_eq!(category_path("ai-duanju", 0, 20), "/api/videos/category/ai-duanju?page=1&size=20");
         assert_eq!(category_path("a/b", 2, 500), "/api/videos/category/a%2Fb?page=2&size=50");
+        assert_eq!(category_query("ai-duanju", 1, 20, "hot", false), "/api/videos/category/ai-duanju?page=1&size=20&sort=hot");
+        assert_eq!(category_query("ai-duanju", 1, 50, "latest", true), "/api/videos/category/ai-duanju?page=1&size=50&is_original=1&sort=latest");
+    }
+
+    #[test]
+    fn normalizes_relative_assets_in_home_sections() {
+        let mut home = serde_json::json!({
+            "featured": [{ "cover": "/upload/a.jpg" }],
+            "latest": [{ "cover": "https://cdn.example/b.jpg" }],
+            "topic_rec": [{ "cover": "/upload/topic.jpg" }],
+        });
+        super::normalize_home_assets(&mut home, "https://mirror.example");
+        assert_eq!(home["featured"][0]["cover"], "https://mirror.example/upload/a.jpg");
+        assert_eq!(home["latest"][0]["cover"], "https://cdn.example/b.jpg");
+        assert_eq!(home["topic_rec"][0]["cover"], "https://mirror.example/upload/topic.jpg");
     }
 
     #[test]

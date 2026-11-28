@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { api, fmt } from "../api";
 import type { Comment, CommentPage, Episode } from "../types";
 import { useStore } from "../store";
@@ -55,31 +55,46 @@ export function CommentsPanel({ videoId, ep, total, kind = "video", onClose }: {
   const [page, setPage] = useState(0);
   const [pages, setPages] = useState(1);
   const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
   const [text, setText] = useState("");
   const [sending, setSending] = useState(false);
+  const requestSeq = useRef(0);
   const inputRef = useRef<HTMLInputElement>(null);
 
-  const load = async (p: number) => {
+  const load = useCallback(async (p: number) => {
+    const seq = ++requestSeq.current;
+    if (p === 1) {
+      setItems([]);
+      setPage(0);
+      setPages(1);
+    }
     setLoading(true);
+    setError("");
     try {
       const res: CommentPage | null = kind === "post"
         ? await api.postComments(videoId, p, 20)
         : await api.comments(videoId, ep, p, 20);
+      if (seq !== requestSeq.current) return;
+      const received = Array.isArray(res?.items) ? res.items : [];
       setItems((prev) => {
         const base = p === 1 ? [] : prev;
         const seen = new Set(base.map((x) => x.id));
-        return [...base, ...(res?.items || []).filter((x) => !seen.has(x.id))];
+        return [...base, ...received.filter((x) => !seen.has(x.id))];
       });
       setPage(p);
-      setPages(res?.pagination?.pages || 1);
-    } catch {
-      if (p === 1) setItems([]);
+      setPages(Math.max(1, Number(res?.pagination?.pages) || 1));
+    } catch (e) {
+      if (seq !== requestSeq.current) return;
+      setError((e as Error)?.message || "评论加载失败，请重试");
     } finally {
-      setLoading(false);
+      if (seq === requestSeq.current) setLoading(false);
     }
-  };
+  }, [videoId, ep, kind]);
 
-  useEffect(() => { load(1); /* eslint-disable-next-line */ }, [videoId, ep, kind]);
+  useEffect(() => {
+    void load(1);
+    return () => { requestSeq.current++; };
+  }, [load]);
 
   const send = async () => {
     const t = text.trim();
@@ -126,13 +141,17 @@ export function CommentsPanel({ videoId, ep, total, kind = "video", onClose }: {
           </div>
         )) : loading ? (
           <div className="flex justify-center py-10"><div className="w-7 h-7 spinner" /></div>
+        ) : error ? (
+          <Empty icon={<IHeart size={22} />} title="评论加载失败" sub={error} action="重试" onAction={() => void load(1)} />
         ) : (
           <Empty icon={<IHeart size={22} />} title="还没有评论" sub="来抢第一个沙发" />
         )}
         {items.length > 0 && (
           <div className="flex justify-center py-4">
             {loading ? <div className="w-5 h-5 spinner" />
-              : page < pages ? (
+              : error ? (
+                <button onClick={() => void load(page + 1)} className="px-4 h-8 rounded-(--r-ctl) bg-s3 text-[11.5px] text-primary pressable">加载失败，重试</button>
+              ) : page < pages ? (
                 <button onClick={() => load(page + 1)} className="px-4 h-8 rounded-(--r-ctl) bg-s3 text-[11.5px] text-on/80 pressable">查看更多</button>
               ) : <span className="text-[10.5px] text-dim">— 到底啦 —</span>}
           </div>

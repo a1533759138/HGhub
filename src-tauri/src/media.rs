@@ -33,6 +33,9 @@ static IMG_CACHE: Lazy<Mutex<HashMap<String, Arc<Vec<u8>>>>> =
 static PL_CACHE: Lazy<Mutex<HashMap<String, (Arc<String>, Arc<Vec<String>>)>>> =
     Lazy::new(|| Mutex::new(HashMap::new()));
 
+#[cfg(target_os = "ios")]
+const IMG_CACHE_MAX: usize = 120;
+#[cfg(not(target_os = "ios"))]
 const IMG_CACHE_MAX: usize = 240;
 const PL_CACHE_MAX: usize = 60;
 
@@ -218,9 +221,15 @@ fn absolutize_uri_in_attr(base: &str, line: &str) -> String {
 type Seg = (Option<String>, Arc<Vec<u8>>);
 type SegCell = Arc<tokio::sync::OnceCell<Result<Seg, String>>>;
 
-/// 分片缓存上限：约 30 片 / 2.5 分钟
+/// 分片缓存上限：iOS 限制 24 MiB，其它平台 64 MiB，降低移动端连续播放的内存峰值。
+#[cfg(target_os = "ios")]
+const SEG_CACHE_BYTES: usize = 24 * 1024 * 1024;
+#[cfg(not(target_os = "ios"))]
 const SEG_CACHE_BYTES: usize = 64 * 1024 * 1024;
-/// 每取一片，往后预取几片（约 20 秒）
+/// 每取一片，往后预取几片；iOS 两片，其它平台四片。
+#[cfg(target_os = "ios")]
+const SEG_PREFETCH: usize = 2;
+#[cfg(not(target_os = "ios"))]
 const SEG_PREFETCH: usize = 4;
 const SEG_INDEX_MAX: usize = 20_000;
 

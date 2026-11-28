@@ -192,7 +192,7 @@ GET /api/videos/category/{cate}?page=1&size=20
 | --- | --- | --- |
 | 热播榜 | `/ranks/hot/` | `GET /api/ranks/hot` |
 | 推荐榜 | `/ranks/recommend/` | `GET /api/ranks/recommend` |
-| 潜力榜 | `/ranks/potential/` | `GET /api/ranks/potential` |
+| 飙升榜 | `/ranks/potential/` | `GET /api/ranks/potential` |
 
 ```json
 {

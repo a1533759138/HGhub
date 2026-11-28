@@ -12,7 +12,7 @@ export const CHANNELS = [
 ] as const;
 
 /** 热门题材标签（与官网分类页标签栏一致） */
-const HOT_TAGS = ["都市", "逆袭", "古风", "系统", "后宫", "校园", "仙侠", "职场", "大男主", "御姐", "脑洞", "奇幻"];
+const HOT_TAGS = ["现代", "都市", "乱伦", "大男主", "熟女", "后宫", "绿帽", "母子", "系统", "校园", "古风", "职场", "逆袭", "奇幻", "甜宠", "脑洞", "单女主", "ntr", "穿越", "年下"];
 
 /* ================= 分类总览（只保留 AI成人短剧） ================= */
 export default function Category({ wide }: { wide: boolean }) {
@@ -107,11 +107,13 @@ export default function Category({ wide }: { wide: boolean }) {
 }
 
 /* ================= 频道详情页 ================= */
-export function ChannelPage({ cate, name, onBack, wide }: { cate: string; name: string; onBack: () => void; wide: boolean }) {
+export function ChannelPage({ cate, name, sort: initialSort = "latest", originalOnly = false, initialTag, onBack, wide }: {
+  cate: string; name: string; sort?: ChannelSort; originalOnly?: boolean; initialTag?: string; onBack: () => void; wide: boolean;
+}) {
   const { push } = useStore();
-  const [sort, setSort] = useState<ChannelSort>("latest");
-  const [tag, setTag] = useState<string | null>(null);
-  const { items, page, pages, loading, error: err, loadMore, refresh, hasMore } = useChannelVideos(cate, sort);
+  const [sort, setSort] = useState<ChannelSort>(initialSort);
+  const [tag, setTag] = useState<string | null>(initialTag || null);
+  const { items, page, pages, loading, error: err, loadMore, refresh, hasMore } = useChannelVideos(cate, sort, originalOnly);
   const sentinel = useRef<HTMLDivElement>(null);
   const filtered = tag ? items.filter((v) => (v.tags || []).includes(tag)) : items;
 

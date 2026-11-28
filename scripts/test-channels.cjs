@@ -139,7 +139,7 @@ test("latest/hot_window/random reach the real API invoke boundary", async () => 
     const channel = createChannel("ai-duanju", sort);
     try {
       assert.equal(channel.requests.length, 1);
-      assert.deepEqual(channel.requests[0].args, { cate: "ai-duanju", page: 1, size: 20, sort });
+      assert.deepEqual(channel.requests[0].args, { cate: "ai-duanju", page: 1, size: 20, sort, original: false });
       await channel.resolve(0, page([3, 1, 2], 1, 4, 73));
       assert.deepEqual(ids(channel.state), [3, 1, 2], "Preserve server order");
       assert.equal(channel.state.total, 73);
@@ -238,7 +238,7 @@ test("refresh/change-batch requests page one and ignores an in-flight older page
       channel.loadMore();
       assert.equal(channel.requests[2].args.page, 3);
       channel.refresh();
-      assert.deepEqual(channel.requests[3].args, { cate: "ai-duanju", page: 1, size: 20, sort });
+      assert.deepEqual(channel.requests[3].args, { cate: "ai-duanju", page: 1, size: 20, sort, original: false });
       assert.deepEqual(ids(channel.state), []);
       await channel.resolve(2, page([3], 3, 4));
       assert.deepEqual(ids(channel.state), []);
@@ -255,7 +255,7 @@ test("changing the category ignores its predecessor's response", async () => {
   const channel = createChannel("old-channel", "random");
   try {
     channel.update({ cate: "new-channel" });
-    assert.deepEqual(channel.requests[1].args, { cate: "new-channel", page: 1, size: 20, sort: "random" });
+    assert.deepEqual(channel.requests[1].args, { cate: "new-channel", page: 1, size: 20, sort: "random", original: false });
     await channel.resolve(1, page([12]));
     await channel.resolve(0, page([99]));
     assert.deepEqual(ids(channel.state), [12]);
